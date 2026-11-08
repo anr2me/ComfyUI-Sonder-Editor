@@ -11,6 +11,14 @@ a fresh `[Unreleased]` block.
 
 ## [Unreleased]
 
+### Added
+- Right-click a staged Reference item and choose **Set Reference to Selection** to give it the current In–Out range, as one Undo step. A range that reaches the scene end keeps following it. The entry is greyed out until both In and Out are set, and on a locked lane; a range that would overlap another item on the lane is refused.
+
+### Fixed
+- Clicking a timeline item too narrow to show its middle selects it, and Ctrl- or Shift-click adds it to the selection. A narrow item keeps a middle you can drag to move it; zoom in to trim one. Grabbing an edge and letting go without moving it no longer saves anything or adds an Undo step.
+- Dropping a clip on another clip of a different length no longer leaves them overlapping. On one lane the two trade places within the space they already cover; across lanes a swap that would land on another item is refused, and the drag stays where it last fit. A linked or locked clip is no longer swapped.
+- Dragging a guide that sits at the scene end now starts from where it is shown, instead of jumping to the start of the scene. A linked partner moves by the same distance.
+
 ## [0.8.3] - 2026-11-05
 
 ### Added

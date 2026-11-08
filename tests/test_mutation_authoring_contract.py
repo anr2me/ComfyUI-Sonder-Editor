@@ -1527,6 +1527,12 @@ MIRRORED_MODULES = {
             "test_every_decision_agrees_across_the_battery",
             "test_batch_addressing_matches_the_browser_batch_policy")),
     },
+    "timeline_gesture_geometry.js": {
+        "scope": ("The lane-fit decision a drag commit's final state must pass, not where a "
+                  "swap places its pair (client gesture policy) nor the trim no-op test."),
+        "authorities": ("server/routes.py::_require_media_target_bounds_fit",),
+        "tests": ("test_gesture_geometry_parity.py::test_swap_fit_matches_the_server_final_state_check",),
+    },
     "scene_split_geometry.js": {
         "scope": "Clip/audio split-half geometry and source-duration sentinel semantics, not link repartition.",
         "authorities": ("server/routes.py::_split_clip_object", "server/routes.py::_split_audio_object"),
@@ -1598,7 +1604,8 @@ def test_declared_mirror_headers_match_the_inventory_both_ways():
 
 def test_every_declared_mirror_has_a_live_parity_disposition():
     _assert_mirror_obligations(MIRRORED_MODULES, ROOT)
-    assert sum(len(row["authorities"]) for row in MIRRORED_MODULES.values()) == 71
+    # 72: `timeline_gesture_geometry.js` joined with one authority (UX pass phase 1).
+    assert sum(len(row["authorities"]) for row in MIRRORED_MODULES.values()) == 72
 
 @pytest.mark.parametrize("name, valid", [("TABLE", True), ("row", False), ("transform", True)])
 def test_mirror_authorities_are_module_declarations(tmp_path, name, valid):

@@ -2705,6 +2705,173 @@ def test_scene_mutation_linked_trim_collision_refuses_atomically(monkeypatch, tm
     assert scene.audio_tracks[0].timeline_end_frame == 10
 
 
+def _swap_scene():
+    scene = Scene(scene_id="scene-1", name="Scene", duration_frames=200)
+    scene.video_lane_configs = [LaneConfig()]
+    scene.clips = [
+        ClipReference(clip_id="clip-a", timeline_start_frame=0, timeline_end_frame=20, source_out_frame=20, total_source_frames=20, track_index=0),
+        ClipReference(clip_id="clip-b", timeline_start_frame=20, timeline_end_frame=100, source_out_frame=80, total_source_frames=80, track_index=0),
+        ClipReference(clip_id="clip-c", timeline_start_frame=120, timeline_end_frame=140, source_out_frame=20, total_source_frames=20, track_index=0),
+    ]
+    return scene
+
+
+def _swap_ops(a_bounds, b_bounds):
+    return [
+        {"type": "update_clip", "clip_id": "clip-a", "validate_lane_collision_after_batch": True,
+         "fields": {"track_index": 0, "timeline_start_frame": a_bounds[0], "timeline_end_frame": a_bounds[1]}},
+        {"type": "update_clip", "clip_id": "clip-b", "validate_lane_collision_after_batch": True,
+         "fields": {"track_index": 0, "timeline_start_frame": b_bounds[0], "timeline_end_frame": b_bounds[1]}},
+    ]
+
+
+def test_a_swap_batch_is_judged_on_its_final_state(monkeypatch, tmp_path):
+    """The first operation of a swap overlaps the item the second one moves
+    away; only the final state may decide. The order-exchanging swap fits."""
+    route_module = _load_route_module(monkeypatch)
+    scene = _swap_scene()
+    project = TimelineProject(project_dir=str(tmp_path), name="Project", scenes=[scene])
+    saves = []
+
+    response = _apply_scene_operations(route_module, monkeypatch, project, "scene-1",
+                                       _swap_ops((80, 100), (0, 80)), saves)
+
+    assert response.status == 200, _response_json(response)
+    assert len(saves) == 1
+    clips = {clip.clip_id: (clip.timeline_start_frame, clip.timeline_end_frame) for clip in scene.clips}
+    assert clips["clip-a"] == (80, 100) and clips["clip-b"] == (0, 80)
+
+
+@pytest.mark.parametrize("a_bounds,b_bounds", [
+    ((20, 40), (0, 80)),     # the old swap: the pair overlaps itself
+    ((110, 130), (0, 80)),   # a destination lands on a third item
+])
+def test_a_swap_batch_whose_final_state_overlaps_is_refused_whole(monkeypatch, tmp_path, a_bounds, b_bounds):
+    route_module = _load_route_module(monkeypatch)
+    scene = _swap_scene()
+    project = TimelineProject(project_dir=str(tmp_path), name="Project", scenes=[scene])
+    saves = []
+
+    response = _apply_scene_operations(route_module, monkeypatch, project, "scene-1",
+                                       _swap_ops(a_bounds, b_bounds), saves)
+
+    assert response.status == 409
+    assert _response_json(response)["code"] == "lane_collision"
+    # Nothing reaches disk. (This fixture hands the route one in-memory
+    # project; the real route reloads the document for every attempt.)
+    assert saves == []
+
+
+def test_a_linked_scene_end_guide_moves_its_partner_by_the_shown_distance(monkeypatch, tmp_path):
+    """A guide pinned to the scene end is stored as -1; the linked delta is
+    measured from the frame it shows (duration - 1), never from -1."""
+    route_module = _load_route_module(monkeypatch)
+    scene = Scene(scene_id="scene-1", name="Scene", duration_frames=100)
+    scene.video_lane_configs = [LaneConfig()]
+    scene.guide_frames = [GuideFrame(guide_id="end", frame_index=-1, asset_id="asset-end")]
+    scene.clips = [
+        ClipReference(clip_id="clip-a", timeline_start_frame=60, timeline_end_frame=90, source_out_frame=30, total_source_frames=30, track_index=0),
+    ]
+    scene.linked_item_groups = [{
+        "group_id": "pair",
+        "items": [{"type": "guide", "id": "end"}, {"type": "clip", "id": "clip-a"}],
+    }]
+    project = TimelineProject(project_dir=str(tmp_path), name="Project", scenes=[scene])
+    saves = []
+
+    response = _apply_scene_operations(route_module, monkeypatch, project, "scene-1", [{
+        "type": "move_guide", "from_frame_index": -1, "to_frame_index": 94,
+        "expected": {"frame_index": -1, "asset_id": "asset-end", "guide_id": "end", "replaces_guide_id": ""},
+        "guide_id": "end", "asset_id": "asset-end", "source": "asset", "strength": 1.0, "muted": False,
+        "apply_linked": True,
+    }], saves)
+
+    assert response.status == 200, _response_json(response)
+    assert scene.guide_frames[0].frame_index == 94
+    assert (scene.clips[0].timeline_start_frame, scene.clips[0].timeline_end_frame) == (55, 85)
+
+
+def test_a_drag_that_carries_a_legacy_overlap_along_is_not_refused(monkeypatch, tmp_path):
+    """Two clips that already overlap (an item-editor move can leave that),
+    dragged together by one delta: the preview skips dragged-vs-dragged pairs,
+    so the server's final-state check must tolerate an overlap the batch did
+    not create -- and still refuse one it does."""
+    route_module = _load_route_module(monkeypatch)
+    scene = Scene(scene_id="scene-1", name="Scene", duration_frames=300)
+    scene.video_lane_configs = [LaneConfig()]
+    scene.clips = [
+        ClipReference(clip_id="clip-a", timeline_start_frame=0, timeline_end_frame=50, source_out_frame=50, total_source_frames=50, track_index=0),
+        ClipReference(clip_id="clip-b", timeline_start_frame=40, timeline_end_frame=90, source_out_frame=50, total_source_frames=50, track_index=0),
+        ClipReference(clip_id="clip-c", timeline_start_frame=120, timeline_end_frame=140, source_out_frame=20, total_source_frames=20, track_index=0),
+    ]
+    project = TimelineProject(project_dir=str(tmp_path), name="Project", scenes=[scene])
+    saves = []
+
+    def drag(delta):
+        return [{"type": "update_clip", "clip_id": clip_id, "validate_lane_collision_after_batch": True,
+                 "fields": {"track_index": 0, "timeline_start_frame": start + delta, "timeline_end_frame": end + delta}}
+                for clip_id, start, end in (("clip-a", 0, 50), ("clip-b", 40, 90))]
+
+    accepted = _apply_scene_operations(route_module, monkeypatch, project, "scene-1", drag(10), saves)
+    assert accepted.status == 200, _response_json(accepted)
+
+    scene.clips[0].timeline_start_frame, scene.clips[0].timeline_end_frame = 0, 50
+    scene.clips[1].timeline_start_frame, scene.clips[1].timeline_end_frame = 40, 90
+    refused = _apply_scene_operations(route_module, monkeypatch, project, "scene-1", drag(40), saves)
+    assert refused.status == 409
+    assert _response_json(refused)["code"] == "lane_collision"
+
+
+def test_a_batch_without_the_after_batch_flag_keeps_its_old_acceptance(monkeypatch, tmp_path):
+    """Unflagged operations are untouched by the final-state check."""
+    route_module = _load_route_module(monkeypatch)
+    scene = _swap_scene()
+    project = TimelineProject(project_dir=str(tmp_path), name="Project", scenes=[scene])
+    saves = []
+    ops = _swap_ops((20, 40), (0, 80))
+    for op in ops:
+        del op["validate_lane_collision_after_batch"]
+
+    response = _apply_scene_operations(route_module, monkeypatch, project, "scene-1", ops, saves)
+
+    assert response.status == 200
+    assert len(saves) == 1
+
+
+def _linked_end_guide_scene():
+    scene = Scene(scene_id="scene-1", name="Scene", duration_frames=100)
+    scene.video_lane_count = 2
+    scene.video_lane_configs = [LaneConfig(), LaneConfig()]
+    scene.guide_frames = [GuideFrame(guide_id="end", frame_index=-1, asset_id="asset-end")]
+    scene.clips = [
+        ClipReference(clip_id="clip-a", timeline_start_frame=60, timeline_end_frame=100, source_out_frame=40, total_source_frames=60, track_index=0),
+    ]
+    scene.linked_item_groups = [{
+        "group_id": "pair",
+        "items": [{"type": "guide", "id": "end"}, {"type": "clip", "id": "clip-a"}],
+    }]
+    return scene
+
+
+@pytest.mark.parametrize("fields", [
+    {"track_index": 1},                                                        # a lane-only drag
+    {"timeline_start_frame": 70, "timeline_end_frame": 100, "source_in_frame": 10},  # a left trim
+    {"timeline_start_frame": 60, "timeline_end_frame": 90, "source_out_frame": 30},  # a right trim off the end
+])
+def test_a_linked_write_that_does_not_move_the_scene_end_guide_keeps_it_pinned(monkeypatch, tmp_path, fields):
+    route_module = _load_route_module(monkeypatch)
+    scene = _linked_end_guide_scene()
+    project = TimelineProject(project_dir=str(tmp_path), name="Project", scenes=[scene])
+    saves = []
+
+    response = _apply_scene_operations(route_module, monkeypatch, project, "scene-1", [{
+        "type": "update_clip", "clip_id": "clip-a", "apply_linked": True, "fields": fields,
+    }], saves)
+
+    assert response.status == 200, _response_json(response)
+    assert scene.guide_frames[0].frame_index == -1
+
+
 def _mutations_handler(route_module):
     return _route_handler(
         route_module,

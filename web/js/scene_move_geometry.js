@@ -137,11 +137,17 @@ export const MEMBER_BOUND_FIELDS = Object.freeze({
     guide: { start: "frame_index", end: null },
 });
 
-/** Read one member's bounds the way `_item_bounds` does. */
-export function memberBounds(type, data) {
+/** Read one member's bounds the way `_item_bounds` does.
+ *
+ *  A guide pinned to the scene end is stored as `-1` and read at the frame it
+ *  shows, `max(0, sceneDuration - 1)`, with `sceneDuration` the scene's
+ *  `duration_frames` as the server reads it.
+ */
+export function memberBounds(type, data, { sceneDuration = 0 } = {}) {
     const fields = MEMBER_BOUND_FIELDS[type];
     if (!fields || !data) return null;
-    const start = Number(data[fields.start]) || 0;
+    let start = Number(data[fields.start]) || 0;
+    if (type === "guide" && start === -1) start = Math.max(0, (Number(sceneDuration) || 0) - 1);
     return { start, end: fields.end ? (Number(data[fields.end]) || 0) : start + 1 };
 }
 

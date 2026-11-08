@@ -126,8 +126,13 @@ Prompt.
 A video or image asset on a video lane. Lanes composite top-down with
 per-clip opacity. Click selects (a linked clip selects its whole group);
 double-click isolates one item and opens its inline editor (start, opacity,
-visibility, fit mode). Drag moves, edge-drag trims, and dragging onto an
-occupied lane of the same type swaps lanes with the displaced item.
+visibility, fit mode). Drag moves and edge-drag trims; to trim a very narrow
+clip, zoom in first.
+
+Drop a clip on another clip to swap them. On the same lane they trade places
+within the space they already cover; on another lane each takes the other's
+place. If the swap would overlap a third item, or the other clip is locked or
+linked, nothing is swapped.
 
 Each clip has a **fit mode** for when its aspect ratio differs from the
 scene: *Fit (black bars)*, *Fit (edge pad)* (default — pads by replicating
@@ -167,7 +172,9 @@ they cannot be split. Use separate lanes for separate conditioning sources.
 ### Reference items
 
 A [Reference item](references.md#reference-lanes) places Library members over
-a range of frames. Drag to move it; trim its edges to change the range.
+a range of frames. Drag to move it; trim its edges to change the range. To
+give it an exact range, set **In** and **Out**, then right-click the item and
+choose **Set Reference to Selection**.
 
 Create one by dragging a Reference from the **References** sidebar onto the
 timeline. Dropping on the **ruler** always makes a new lane; dropping on an

@@ -1259,10 +1259,10 @@ GUARD_EXEMPT_SITES = {
         ('profiles', 'profiles.<opaque>', 'semantic_units', 'semantic_units.<opaque>', 'type'),
     ],
     "editor_widget.js:_commitItemMove:update_audio_track": [
-        ('fields', 'fields.<opaque>', 'track_id', 'type'),
+        ('fields', 'fields.<opaque>', 'track_id', 'type', 'validate_lane_collision_after_batch'),
     ],
     "editor_widget.js:_commitItemMove:update_clip": [
-        ('clip_id', 'fields', 'fields.<opaque>', 'type'),
+        ('clip_id', 'fields', 'fields.<opaque>', 'type', 'validate_lane_collision_after_batch'),
     ],
     "editor_widget.js:_commitTrim:update_audio_track": [
         ('apply_linked', 'fields', 'fields.source_in_frame', 'fields.timeline_end_frame', 'fields.timeline_start_frame', 'track_id', 'type', 'validate_lane_collision'),

@@ -1681,6 +1681,10 @@ def _item_bounds(scene: Scene, ref: dict) -> tuple[int, int]:
         return int(item.timeline_start_frame), int(item.timeline_end_frame)
     if item_type == "guide":
         idx = int(item.frame_index)
+        if idx == -1:
+            # Pinned to the scene end: a linked move's delta is measured from
+            # the frame it shows, never from the sentinel.
+            idx = max(0, int(getattr(scene, "duration_frames", 0) or 0) - 1)
         return idx, idx + 1
     if item_type == "prompt":
         return int(item.start_frame), int(item.end_frame)
@@ -1891,8 +1895,12 @@ def _apply_linked_bounds_update(
         else:
             next_start = old_start + delta_start if old_start == anchor_old_start else old_start
             next_end = old_end + delta_end if old_end == anchor_old_end else old_end
-            if next_start == old_start and next_end == old_end:
-                continue
+        # A member this write does not move is not rewritten: a delta-0 move (a
+        # lane-only drag) or a trim that does not reach it. A guide is one frame,
+        # so only its start counts -- and rewriting a scene-end guide at the
+        # frame it shows would unpin it from the end (`_item_bounds`).
+        if next_start == old_start and (next_end == old_end or ref_type == "guide"):
+            continue
         target_bounds[key] = (next_start, next_end)
         if ref_type == "prompt":
             prompt_targets[ref_id] = (_resolve_link_ref(scene, ref_type, ref_id), next_start, next_end)
@@ -2839,22 +2847,101 @@ def _media_item_lane(item) -> tuple[str, int]:
     return "audio", int(getattr(item, "lane_index", 0) or 0)
 
 
-def _require_media_target_bounds_fit(scene: Scene, targets: list[tuple[object, int, int, str, int]]) -> None:
+def _require_media_target_bounds_fit(scene: Scene, targets: list[tuple[object, int, int, str, int]],
+                                     tolerated: frozenset = frozenset()) -> None:
+    """Refuse targets that overlap each other or another item on their lane.
+
+    `tolerated` holds `frozenset({id_a, id_b})` pairs that may overlap: the
+    after-batch check passes the pairs that already overlapped before the
+    batch, so a drag that carries a legacy overlap along is not refused for it.
+    """
     target_ids = {_media_item_id(item) for item, *_rest in targets}
     for index, (item, start, end, lane_type, lane_index) in enumerate(targets):
         if end <= start:
             _mutation_error("Timeline item range must be at least one frame", 409, "invalid_range")
+        item_id = _media_item_id(item)
         for other, other_start, other_end, other_lane_type, other_lane_index in targets[index + 1:]:
             if lane_type != other_lane_type or lane_index != other_lane_index:
+                continue
+            if frozenset((item_id, _media_item_id(other))) in tolerated:
                 continue
             if _media_bounds_overlap(start, end, other_start, other_end):
                 _mutation_error("Timeline items cannot overlap on one lane", 409, "lane_collision")
         for other in _media_lane_items(scene, lane_type, lane_index):
-            if _media_item_id(other) in target_ids:
+            other_id = _media_item_id(other)
+            if other_id in target_ids or frozenset((item_id, other_id)) in tolerated:
                 continue
             other_start, other_end = _media_item_bounds(other)
             if _media_bounds_overlap(start, end, other_start, other_end):
                 _mutation_error("Timeline item overlaps another item on the lane", 409, "lane_collision")
+
+
+def _media_overlapping_pairs(scene: Scene) -> frozenset:
+    """Every pair of clips or audio items that overlap on one lane right now."""
+    lanes: dict = {}
+    for item in list(getattr(scene, "clips", []) or []) + list(getattr(scene, "audio_tracks", []) or []):
+        lanes.setdefault(_media_item_lane(item), []).append((_media_item_id(item), *_media_item_bounds(item)))
+    pairs = set()
+    for rows in lanes.values():
+        rows.sort(key=lambda row: row[1])
+        for index, (item_id, start, end) in enumerate(rows):
+            for other_id, other_start, other_end in rows[index + 1:]:
+                if other_start >= end:
+                    break
+                if _media_bounds_overlap(start, end, other_start, other_end):
+                    pairs.add(frozenset((item_id, other_id)))
+    return frozenset(pairs)
+
+
+def _batch_validates_media_bounds_after(operations: list) -> bool:
+    return any(isinstance(operation, dict)
+               and operation.get("validate_lane_collision_after_batch") is True
+               for operation in operations)
+
+
+def _validate_media_bounds_after_batch(scene: Scene, operations: list,
+                                       tolerated: frozenset = frozenset()) -> None:
+    """Lane fit for the clips and audio a batch names, judged on its FINAL state.
+
+    `validate_lane_collision` checks each operation as it applies, so it cannot
+    judge a swap: the first move lands on the item the second one moves away.
+    An `update_clip` / `update_audio_track` carrying
+    `validate_lane_collision_after_batch` is instead checked here, once every
+    operation has applied, against each other and every other item on its lane.
+    The batch is in memory, so a refusal discards it whole. Linked partners an
+    operation moves through `apply_linked` are not named, so not checked as
+    targets (they are still the "others" a target must not land on).
+    `tolerated` is the pairs that already overlapped before the batch: moving
+    a legacy overlap along is not this gesture's collision, and the client's
+    preview, which skips dragged-vs-dragged pairs, accepts it.
+    """
+    targets = []
+    seen = set()
+    for operation in operations:
+        if not isinstance(operation, dict) or operation.get("validate_lane_collision_after_batch") is not True:
+            continue
+        op_type = str(operation.get("type") or "")
+        if op_type == "update_clip":
+            item_id = str(operation.get("clip_id", "") or "")
+            pool = getattr(scene, "clips", []) or []
+            key = "clip_id"
+        elif op_type == "update_audio_track":
+            item_id = str(operation.get("track_id", "") or "")
+            pool = getattr(scene, "audio_tracks", []) or []
+            key = "track_id"
+        else:
+            continue
+        if (op_type, item_id) in seen:
+            continue
+        seen.add((op_type, item_id))
+        item = next((row for row in pool if str(getattr(row, key, "") or "") == item_id), None)
+        if item is None:
+            continue
+        start, end = _media_item_bounds(item)
+        lane_type, lane_index = _media_item_lane(item)
+        targets.append((item, start, end, lane_type, lane_index))
+    if targets:
+        _require_media_target_bounds_fit(scene, targets, tolerated)
 
 
 def _history_violation(code, message, item_type=None, item_id=None,
@@ -6328,10 +6415,13 @@ def _apply_scene_mutation_batch(project: TimelineProject, scene_id: str,
     batch_start = {"video_lane_count": _scene_lane_count(scene, "video"),
                    "audio_lane_count": _scene_lane_count(scene, "audio"),
                    "audio_lane_configs": copy.deepcopy(list(scene.audio_lane_configs))}
+    overlaps_before = (_media_overlapping_pairs(scene)
+                       if _batch_validates_media_bounds_after(operations) else frozenset())
     results = [
         _apply_scene_mutation_operation(project, scene, operation, batch_start=batch_start)
         for operation in operations
     ]
+    _validate_media_bounds_after_batch(scene, operations, overlaps_before)
     _validate_single_driver_per_lane(scene)
 
     committed = scene_before is None or scene.to_dict() != scene_before

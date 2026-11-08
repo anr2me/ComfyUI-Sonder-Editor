@@ -289,7 +289,8 @@ export const SCENE_MUTATION_COALESCING = Object.freeze({
     update_clip: collapsible(
         (op) => (foldsWhileLinked(op)
             ? `clip:${text(op.clip_id)}:${flag(op.apply_linked)}`
-                + `:${flag(op.validate_lane_collision)}:${boundsSignature(op)}`
+                + `:${flag(op.validate_lane_collision)}:${flag(op.validate_lane_collision_after_batch)}`
+                + `:${boundsSignature(op)}`
             : null),
         "`_apply_update_clip` writes only the keys `fields` names and replaces "
         + "each value outright -- EXCEPT `timeline_start_frame`, whose meaning "
@@ -301,7 +302,8 @@ export const SCENE_MUTATION_COALESCING = Object.freeze({
     update_audio_track: collapsible(
         (op) => (foldsWhileLinked(op)
             ? `audio:${text(op.track_id)}:${flag(op.apply_linked)}`
-                + `:${flag(op.validate_lane_collision)}:${boundsSignature(op)}`
+                + `:${flag(op.validate_lane_collision)}:${flag(op.validate_lane_collision_after_batch)}`
+                + `:${boundsSignature(op)}`
             : null),
         "`_apply_update_audio_track` is the audio twin of `_apply_update_clip`, "
         + "with the same duration-preserving `timeline_start_frame` branch and "

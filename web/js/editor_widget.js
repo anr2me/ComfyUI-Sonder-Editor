@@ -506,6 +506,7 @@ import {
     movedMediaBounds, movedMemberBounds, memberBounds, writeMemberBounds,
     linkedMoveRefusal,
 } from "./scene_move_geometry.js";
+import { trimChangedBounds, swapDestinations, swapFitRefusal } from "./timeline_gesture_geometry.js";
 import { LINK_ITEM_TYPES, pruneLinkedItemGroups, editedLinkGroups, rollbackLinkGroupPrediction } from "./scene_link_groups.js";
 import {
     canonicalJson, canonicalStagedMemberRefs, plannedReferenceItemUpdate,
@@ -803,17 +804,19 @@ const REFERENCE_DROP_REFUSALS = {
     default: "That Reference lane is locked, occupied at this frame, or uses a different media kind.",
 };
 
-// The two surfaces that write a staged Reference item through
+// The surfaces that write a staged Reference item through
 // `_writeReferenceItemFromPanelWithinGesture`, and what each says and records:
-// the Lane Setup panel's field and member edits, and the append a Library drop
-// on a bar (or the panel's member picker) makes. One writer, so both share the
-// barrier and the per-field rollback chains; the key discriminator keeps an
-// append readable in the queue and the session log.
+// the Lane Setup panel's field and member edits, the append a Library drop on
+// a bar (or the panel's member picker) makes, and the timeline menu's Set
+// Reference to Selection. One writer, so all share the barrier and the
+// per-field rollback chains; the key discriminator keeps each readable in the
+// queue and the session log.
 //
-// Only the panel opts into the ordered history baseline. It costs a scene GET
-// before the first write of every wave, and the append is mostly a timeline
-// gesture, which -- like the timeline's other Reference paints -- keeps today's
-// exposure (a Bug Tracker residual) rather than paying that read per drop.
+// The panel and Set Reference to Selection opt into the ordered history
+// baseline. It costs a scene GET before the first write of every wave, which a
+// one-off menu action can afford; the append is mostly a timeline gesture,
+// which -- like the timeline's other Reference paints -- keeps today's exposure
+// (a Bug Tracker residual) rather than paying that read per drop.
 const REFERENCE_ITEM_WRITERS = Object.freeze({
     panel: Object.freeze({
         key: "reference-panel",
@@ -829,7 +832,21 @@ const REFERENCE_ITEM_WRITERS = Object.freeze({
         rollbackDiag: "reference_append_rollback_deferred",
         orderedHistoryBaseline: false,
     }),
+    // Set Reference to Selection: a range write from the timeline menu.
+    timeline: Object.freeze({
+        key: "reference-to-selection",
+        failureMessage: "The Reference item could not be retimed.",
+        refusalSource: "reference-to-selection-refused",
+        rollbackDiag: "reference_to_selection_rollback_deferred",
+        orderedHistoryBaseline: true,
+    }),
 });
+
+/** Every field a trim drag paints onto the item it trims. */
+const TRIM_PAINTED_FIELDS = Object.freeze([
+    "timeline_start_frame", "timeline_end_frame", "source_in_frame", "source_out_frame",
+    "start_frame", "end_frame",
+]);
 
 const FULLSCREEN_TIMELINE_MIN_HEIGHT = 160;
 const FULLSCREEN_TIMELINE_FALLBACK_MAX_HEIGHT = 600;
@@ -7791,6 +7808,27 @@ export class EditorWidget {
         return "ok";
     }
 
+    /** Retime a staged Reference item to the current In-Out, as one Undo step.
+     *
+     *  Through the staged-item writer, so the lock, the route's refusals (an
+     *  overlap says "That range overlaps another item on this lane.") and a
+     *  no-op are all answered before any Undo entry or paint. The range is read
+     *  when the write acts, not when the menu opened; a selection reaching the
+     *  scene end is stored as `-1` where gestures would store it so.
+     */
+    _setReferenceToSelection(row) {
+        const id = String(row?.reference_item_id || "");
+        if (!id) return Promise.resolve("refused");
+        return this._writeReferenceItemFromPanel(id, (live) => {
+            const start = Math.round(Number(this.selectionStart));
+            const end = Math.round(Number(this.selectionEnd));
+            if (!(Number.isFinite(start) && Number.isFinite(end) && start >= 0 && start < end)) {
+                return "Set an In and Out point first.";
+            }
+            return { start_frame: start, end_frame: this._referenceStoredEnd(live, start, end) };
+        }, "set reference to selection", { writer: "timeline" });
+    }
+
     /** What a refused staged-item edit tells the author, by the route's code. */
     _referenceItemRefusalMessage(code) {
         return {
@@ -8460,7 +8498,7 @@ export class EditorWidget {
             return true;
         }
 
-        const bounds = memberBounds(hit.type, row);
+        const bounds = memberBounds(hit.type, row, { sceneDuration: this.activeScene?.duration_frames });
         if (!bounds) return false;
         const next = movedMediaBounds(
             bounds.start, bounds.end, operation.fields.timeline_start_frame);
@@ -8488,7 +8526,8 @@ export class EditorWidget {
         const moves = [];
         const members = this._expandItemsWithLinked([hit]);
         for (const member of members) {
-            const memberAt = memberBounds(member?.type, member?.data);
+            const memberAt = memberBounds(member?.type, member?.data,
+                { sceneDuration: this.activeScene?.duration_frames });
             if (!memberAt) continue;
             const moved = movedMemberBounds(memberAt.start, memberAt.end, delta);
             moves.push({ member, moved });
@@ -11461,6 +11500,15 @@ export class EditorWidget {
         return TimelineCanvas._hitTestEdge(this, x, rawY);
     }
 
+    /** Paint a swap target at its planned destination (`swapDestinations`). */
+    _applySwapDestination(target, destination) {
+        if (!target?.data || !destination) return;
+        target.data.timeline_start_frame = destination.start;
+        target.data.timeline_end_frame = destination.end;
+        if (target.type === "clip") target.data.track_index = destination.laneIndex;
+        else target.data.lane_index = destination.laneIndex;
+    }
+
     _trimDeltaLimits(edgeHit, origStart, origEnd, origSourceIn, origSourceOut, origTotalSourceFrames) {
         let minDelta = -Math.max(0, origSourceIn || 0);
         let maxDelta = Math.max(0, (origTotalSourceFrames || 0) - (origSourceOut || 0));
@@ -12112,9 +12160,11 @@ export class EditorWidget {
                     }
                     return;
                 } else {
-                    // Check if near clip/audio/prompt edges for trimming
+                    // Check if near clip/audio/prompt edges for trimming. A
+                    // modifier press is a selection gesture and never trims.
                     const edgeHit = this._hitTestEdge(x, rawY);
-                    if (edgeHit) {
+                    const selectionModifier = e.ctrlKey || e.metaKey || e.shiftKey;
+                    if (edgeHit && !selectionModifier) {
                         // Block trim on locked lanes
                         if (edgeHit.type === "clip" && this._isLaneLocked(this._clipTrackType(edgeHit.data), edgeHit.data.track_index || 0)) return;
                         if (edgeHit.type === "audio" && this._isLaneLocked(TRACK_TYPE.AUDIO, edgeHit.data.lane_index || 0)) return;
@@ -12151,6 +12201,12 @@ export class EditorWidget {
                             origSourceIn: trimOrigSourceIn,
                             origSourceOut: trimOrigSourceOut,
                             origTotalSourceFrames: trimOrigTotalSource,
+                            // The fields a trim paints, as stored, so a trim that
+                            // moved nothing restores them exactly (a paint can
+                            // turn an absent source window into an explicit one).
+                            origFields: Object.fromEntries(TRIM_PAINTED_FIELDS
+                                .filter((name) => Object.prototype.hasOwnProperty.call(edgeHit.data, name))
+                                .map((name) => [name, edgeHit.data[name]])),
                             historyEntry,
                             ...trimLimits,
                         };
@@ -12162,8 +12218,12 @@ export class EditorWidget {
                         return;
                     }
 
-                    // Check if clicking on a timeline item
-                    const hit = this._hitTestItem(x, rawY);
+                    // Check if clicking on a timeline item. A modifier press on
+                    // an edge selects that edge's item: its zone reaches past a
+                    // narrow item, where the body test finds nothing.
+                    const hit = (edgeHit && selectionModifier)
+                        ? { type: edgeHit.type, id: edgeHit.id, data: edgeHit.data }
+                        : this._hitTestItem(x, rawY);
                     // Locked items are not selectable by any gesture (locked-selection
                     // rule): clicking one is a no-op rather than a select-then-refuse.
                     if (hit && hit.type !== "prompt_global" && this._isItemLocked(hit)) {
@@ -12214,7 +12274,11 @@ export class EditorWidget {
                         this._dragStartFrame = frame;
                         this._lastSnappedDelta = 0; // Track snapped delta for commit
                         this._dragLastValidDelta = 0; // Group hold delta (linked collision)
-                        this._dragItemOrigStart = hit.data.timeline_start_frame ?? hit.data.start_frame ?? hit.data.frame_index ?? 0;
+                        // A Guide drags from the frame it shows: one pinned to the
+                        // scene end is stored as -1, which is no origin at all.
+                        this._dragItemOrigStart = hit.type === "guide"
+                            ? this._resolvedGuideFrame(hit.data)
+                            : (hit.data.timeline_start_frame ?? hit.data.start_frame ?? hit.data.frame_index ?? 0);
                         this._dragItemOrigEnd = hit.data.timeline_end_frame
                             ?? (hit.type === "reference"
                                 ? referenceItemEffectiveBounds(hit.data, this.totalFrames).end
@@ -12230,12 +12294,18 @@ export class EditorWidget {
                         // Store original positions + lane info for all selected items (group move)
                         this._dragItemsOrig = this.selectedItems.map(s => ({
                             type: s.type, id: s.id, data: s.data,
-                            origStart: s.data.timeline_start_frame ?? s.data.start_frame ?? s.data.frame_index ?? 0,
-                            origEnd: s.data.timeline_end_frame
-                                ?? (s.type === "reference"
-                                    ? referenceItemEffectiveBounds(s.data, this.totalFrames).end
-                                    : s.data.end_frame)
-                                ?? (s.data.timeline_start_frame ?? s.data.start_frame ?? s.data.frame_index ?? 0),
+                            origStart: s.type === "guide"
+                                ? this._resolvedGuideFrame(s.data)
+                                : (s.data.timeline_start_frame ?? s.data.start_frame ?? s.data.frame_index ?? 0),
+                            origEnd: s.type === "guide"
+                                ? this._resolvedGuideFrame(s.data)
+                                : (s.data.timeline_end_frame
+                                    ?? (s.type === "reference"
+                                        ? referenceItemEffectiveBounds(s.data, this.totalFrames).end
+                                        : s.data.end_frame)
+                                    ?? (s.data.timeline_start_frame ?? s.data.start_frame ?? s.data.frame_index ?? 0)),
+                            // The Guide's stored index is its identity on the wire.
+                            origFrameIndex: s.type === "guide" ? s.data.frame_index : undefined,
                             origStoredEnd: s.data.end_frame,
                             origLane: s.type === "clip" ? (s.data.track_index || 0)
                                 : ((s.type === "audio" || s.type === "reference") ? (s.data.lane_index || 0) : 0),
@@ -12252,6 +12322,8 @@ export class EditorWidget {
                         this._dragLaneChanged = false;
                         this._dragSwapTarget = null;
                         this._dragLastValidProposed = null;
+                        this._dragLastValidSwapTarget = null;
+                        this._dragLastValidSwapPlan = null;
                         // Snapshot ALL clip/audio lanes AND positions for swap preview + hold-preview restore (#35)
                         this._origAllClipLanes = {};
                         this._origAllClipStarts = {};
@@ -12335,7 +12407,8 @@ export class EditorWidget {
                 } else if (this._razorMode) {
                     canvas.style.cursor = "crosshair";
                 } else if (this._hitTestEdge(x, rawY)) {
-                    canvas.style.cursor = "ew-resize";
+                    // A modifier press on an edge selects, so it shows as one.
+                    canvas.style.cursor = (e.ctrlKey || e.metaKey || e.shiftKey) ? "grab" : "ew-resize";
                 } else if (this._hitTestItem(x, rawY)) {
                     canvas.style.cursor = "grab";
                 } else {
@@ -12539,12 +12612,30 @@ export class EditorWidget {
                     if ((anchor.type === "clip" && hoverLaneType === anchor.origTrackType) ||
                         (anchor.type === "audio" && hoverLaneType === TRACK_TYPE.AUDIO)) {
                         const candidate = this._hitTestItem(x, rawY);
-                        if (candidate && candidate.id !== anchor.id && candidate.type === anchor.type) {
+                        // Only an item the swap can move on its own: a locked one
+                        // refuses, and a linked one would carry partners the
+                        // preview never shows. Otherwise it is an ordinary overlap.
+                        if (candidate && candidate.id !== anchor.id && candidate.type === anchor.type
+                            && !this._isItemLocked(candidate) && !this._shouldApplyLinked(candidate)) {
                             swapTarget = candidate;
                         }
                     }
                 }
                 this._dragSwapTarget = swapTarget;
+                // Both destinations, from the mousedown snapshot (every item was
+                // restored to it above): the anchor's lane type is the target's.
+                const swapPlan = swapTarget ? swapDestinations(
+                    {
+                        start: draggedOrig[0].origStart, end: draggedOrig[0].origEnd,
+                        laneType: draggedOrig[0].origTrackType, laneIndex: draggedOrig[0].origLane,
+                    },
+                    {
+                        start: swapTarget.data.timeline_start_frame ?? 0,
+                        end: swapTarget.data.timeline_end_frame ?? 0,
+                        laneType: draggedOrig[0].origTrackType,
+                        laneIndex: swapTarget.type === "clip"
+                            ? (swapTarget.data.track_index || 0) : (swapTarget.data.lane_index || 0),
+                    }) : null;
 
                 // Compute proposed positions for all dragged items.
                 const proposed = [];
@@ -12552,11 +12643,9 @@ export class EditorWidget {
                     if (orig.type !== "clip" && orig.type !== "audio") continue;
                     const duration = orig.origEnd - orig.origStart;
                     let newStart, newLane;
-                    if (swapTarget && orig.id === this._dragAnchorId) {
-                        newStart = swapTarget.data.timeline_start_frame;
-                        newLane = orig.type === "clip"
-                            ? (swapTarget.data.track_index || 0)
-                            : (swapTarget.data.lane_index || 0);
+                    if (swapPlan && orig.id === this._dragAnchorId) {
+                        newStart = swapPlan.anchor.start;
+                        newLane = swapPlan.anchor.laneIndex;
                     } else {
                         newStart = Math.max(0, orig.origStart + frameDelta);
                         newLane = (orig.origTrackType === this._dragAnchorTrackType)
@@ -12566,19 +12655,32 @@ export class EditorWidget {
                     proposed.push({ orig, newStart, newEnd: newStart + duration, newLane });
                 }
 
-                // Overlap validation (#35 lock-lane-merge). Same-lane overlap with a non-dragged
-                // item is invalid unless that item is the swap target.
-                const ignoreIds = new Set();
-                if (swapTarget) ignoreIds.add(swapTarget.id);
+                // Overlap validation (#35 lock-lane-merge). A swap checks BOTH
+                // destinations, against each other and every third item on
+                // their lanes, as the server's final-state check will.
                 let allFitsValid = true;
-                for (const p of proposed) {
+                if (swapPlan) {
+                    const anchorType = draggedOrig[0].type;
+                    const laneItems = (anchorType === "clip" ? (scene?.clips || []) : (scene?.audio_tracks || []))
+                        .map((item) => ({
+                            id: anchorType === "clip" ? item.clip_id : item.track_id,
+                            start: item.timeline_start_frame ?? 0,
+                            end: item.timeline_end_frame ?? 0,
+                            laneType: anchorType === "clip" ? this._clipTrackType(item) : TRACK_TYPE.AUDIO,
+                            laneIndex: anchorType === "clip" ? (item.track_index || 0) : (item.lane_index || 0),
+                        }));
+                    allFitsValid = !swapFitRefusal([
+                        { id: draggedOrig[0].id, ...swapPlan.anchor },
+                        { id: swapTarget.id, ...swapPlan.target },
+                    ], laneItems);
+                }
+                for (const p of (swapPlan ? [] : proposed)) {
                     const others = p.orig.type === "clip"
                         ? (scene?.clips || [])
                         : (scene?.audio_tracks || []);
                     for (const c of others) {
                         const cid = c.clip_id || c.track_id;
                         if (draggedClipIds.has(cid) || draggedAudioIds.has(cid)) continue;
-                        if (ignoreIds.has(cid)) continue;
                         const cLane = (c.track_index !== undefined) ? c.track_index : c.lane_index;
                         if (cLane !== p.newLane) continue;
                         if (p.orig.type === "clip" && this._clipTrackType(c) !== p.orig.origTrackType) continue;
@@ -12602,20 +12704,11 @@ export class EditorWidget {
                             p.orig.data.lane_index = p.newLane;
                         }
                     }
-                    // Swap target takes anchor's original (position + lane)
-                    if (swapTarget) {
-                        const anchor = draggedOrig[0];
-                        const tDur = (swapTarget.data.timeline_end_frame ?? 0) - (swapTarget.data.timeline_start_frame ?? 0);
-                        swapTarget.data.timeline_start_frame = anchor.origStart;
-                        swapTarget.data.timeline_end_frame = anchor.origStart + tDur;
-                        if (anchor.type === "clip") {
-                            swapTarget.data.track_index = anchor.origLane;
-                        } else {
-                            swapTarget.data.lane_index = anchor.origLane;
-                        }
-                    }
+                    // The swap target takes its planned destination.
+                    if (swapPlan) this._applySwapDestination(swapTarget, swapPlan.target);
                     this._dragLastValidProposed = proposed;
                     this._dragLastValidSwapTarget = swapTarget;
+                    this._dragLastValidSwapPlan = swapPlan;
                     this._dragLastValidDelta = frameDelta;
                     this._dragLaneChanged = (effectiveLaneDelta !== 0) || swapTarget != null;
                 } else if (this._dragLastValidProposed) {
@@ -12626,18 +12719,17 @@ export class EditorWidget {
                         if (p.orig.type === "clip") p.orig.data.track_index = p.newLane;
                         else p.orig.data.lane_index = p.newLane;
                     }
-                    if (this._dragLastValidSwapTarget) {
-                        const lastTarget = this._dragLastValidSwapTarget;
-                        const anchor = draggedOrig[0];
-                        const tDur = (lastTarget.data.timeline_end_frame ?? 0) - (lastTarget.data.timeline_start_frame ?? 0);
-                        // Reapply swap from snapshot to keep the swap target in anchor's origin
-                        lastTarget.data.timeline_start_frame = anchor.origStart;
-                        lastTarget.data.timeline_end_frame = anchor.origStart + tDur;
-                        if (anchor.type === "clip") lastTarget.data.track_index = anchor.origLane;
-                        else lastTarget.data.lane_index = anchor.origLane;
+                    if (this._dragLastValidSwapTarget && this._dragLastValidSwapPlan) {
+                        // Replay the held swap's planned destination for its target.
+                        this._applySwapDestination(this._dragLastValidSwapTarget, this._dragLastValidSwapPlan.target);
                     }
                 }
                 // (else no prior valid state — items already restored to origLane/origStart above)
+                // A refused swap is not the swap the commit makes: the held
+                // preview's own target (or none) is.
+                if (!allFitsValid) {
+                    this._dragSwapTarget = this._dragLastValidProposed ? (this._dragLastValidSwapTarget ?? null) : null;
+                }
 
                 // Linked-collision hold: when clip/audio members are held at the
                 // last valid frame, guides/prompts must hold WITH them — and the
@@ -12690,10 +12782,36 @@ export class EditorWidget {
                 this._finishDragSelect();
                 canvas.style.cursor = "crosshair";
             } else if (wasDragType === "trimEdge" && this._trimItem) {
-                // Commit trim to server
-                commitPromise = this._commitTrim(this._trimItem);
-                this._trimItem = null;
+                const trimInfo = this._trimItem;
                 canvas.style.cursor = "crosshair";
+                if (trimChangedBounds(trimInfo.type, trimInfo.data, trimInfo.origStart, trimInfo.origStoredEnd)) {
+                    commitPromise = this._commitTrim(this._trimItem);
+                } else {
+                    // A trim that moved nothing is a click: no write, and its
+                    // Undo entry goes by object, as the body click's does.
+                    for (const name of TRIM_PAINTED_FIELDS) {
+                        if (Object.prototype.hasOwnProperty.call(trimInfo.origFields || {}, name)) {
+                            trimInfo.data[name] = trimInfo.origFields[name];
+                        } else {
+                            delete trimInfo.data[name];
+                        }
+                    }
+                    this._discardUnstampableUndoEntry(trimInfo.historyEntry);
+                    // Then exactly what a click on the body does: the linked
+                    // group is selected, and only a lone item opens its editor
+                    // (a prompt section is only selected).
+                    this.selectedItems = this._expandItemsWithLinked(this.selectedItems);
+                    this._hideItemEditor();
+                    if (this.selectedItems.length === 1) {
+                        if (trimInfo.type === "prompt") {
+                            const sections = this.activeScene?.prompt_sections || [];
+                            if (trimInfo.id >= 0 && trimInfo.id < sections.length) this._selectedPromptIdx = trimInfo.id;
+                        } else {
+                            this._showItemEditor();
+                        }
+                    }
+                }
+                this._trimItem = null;
             } else if (wasDragType === "moveItem" && this.selectedItems.length > 0) {
                 // Use the snapped delta (stored during mousemove), not raw mouse position
                 const frameDelta = this._lastSnappedDelta || 0;
@@ -12739,6 +12857,7 @@ export class EditorWidget {
                 this._dragSwapTarget = null;
                 this._dragLastValidProposed = null;
                 this._dragLastValidSwapTarget = null;
+                this._dragLastValidSwapPlan = null;
                 this._dragLastValidDelta = null;
                 this._dragAnchorType = null;
                 this._dragAnchorId = null;
@@ -13288,6 +13407,17 @@ export class EditorWidget {
             menuItems.push({
                 label: "Set Selection to Reference",
                 action: () => this._setSelectionToFrameRange(hit.data.start_frame || 0, endFrame),
+            });
+            // The reverse: the item takes the In-Out. Greyed, with the reason,
+            // when the lane is locked or there is no complete In-Out (a lone
+            // In or Out is a draft, not a range).
+            const toSelection = "Set Reference to Selection";
+            const hasInOut = this.selectionStart < this.selectionEnd;
+            menuItems.push({
+                label: itemLocked ? `${toSelection} (locked)`
+                    : (hasInOut ? toSelection : `${toSelection} (set In and Out first)`),
+                action: (itemLocked || !hasInOut) ? () => {} : () => void this._setReferenceToSelection(hit.data),
+                disabled: itemLocked || !hasInOut,
             });
             const laneEntry = (this._trackLayout || []).find((entry) =>
                 entry.type === TRACK_TYPE.REFERENCE && (entry.laneIndex || 0) === (hit.data.lane_index || 0));
@@ -21732,9 +21862,11 @@ export class EditorWidget {
                         fields.timeline_start_frame = clip.timeline_start_frame;
                         fields.timeline_end_frame = clip.timeline_end_frame;
                     }
+                    // Judged on the batch's final state, as a swap needs: its
+                    // first operation alone overlaps the item the second moves.
                     const operation = linkedAwareOperation(
                         { type: "clip", id: clipId, data: clip },
-                        { type: "update_clip", clip_id: clipId, fields }
+                        { type: "update_clip", clip_id: clipId, fields, validate_lane_collision_after_batch: true }
                     );
                     if (operation) operations.push(operation);
                 }
@@ -21754,7 +21886,7 @@ export class EditorWidget {
                     }
                     const operation = linkedAwareOperation(
                         { type: "audio", id: trackId, data: track },
-                        { type: "update_audio_track", track_id: trackId, fields }
+                        { type: "update_audio_track", track_id: trackId, fields, validate_lane_collision_after_batch: true }
                     );
                     if (operation) operations.push(operation);
                 }
@@ -21777,9 +21909,11 @@ export class EditorWidget {
                         });
                     } else if (type === "guide") {
                         if (this._isGuideTrackLocked()) continue;
-                        const oldIdx = orig.origStart;
+                        // Named by its STORED index (-1 for a scene-end Guide);
+                        // the drag itself ran from the shown frame, `origStart`.
+                        const oldIdx = orig.origFrameIndex ?? orig.origStart;
                         const previewIdx = Number.isFinite(data._previewFrameIndex) ? data._previewFrameIndex : null;
-                        const newIdx = previewIdx ?? Math.max(0, Math.min(this.totalFrames - 1, oldIdx + frameDelta));
+                        const newIdx = previewIdx ?? Math.max(0, Math.min(this.totalFrames - 1, orig.origStart + frameDelta));
                         const fields = {
                             guide_id: data.guide_id || "",
                             asset_id: data.asset_id,

@@ -1733,16 +1733,33 @@ export function _hitTestItem(host, x, rawY) {
         return host._hitTestClip(x, rawY) || host._hitTestAudio(x, rawY) || host._hitTestReference(x, rawY) || host._hitTestGuide(x, rawY) || host._hitTestPrompt(x, rawY) || host._hitTestGlobalPrompt(x, rawY);
     }
 
+const TRIM_EDGE_PX = 6;
+
+/** The trim zone of an item `widthPx` wide on screen, each side of each edge.
+ *  Capped at a third of the width so a narrow item always keeps a middle that
+ *  selects and moves; a very narrow item is trimmed after zooming in. */
+export function trimZonePx(widthPx) {
+    return Math.min(TRIM_EDGE_PX, Math.max(0, Number(widthPx) || 0) / 3);
+}
+
 export function _hitTestEdge(host, x, rawY) {
-        const edgePx = 6;
         if (!host.activeScene) return null;
         const layoutIdx = host._layoutIndexFromRawY(rawY);
         if (layoutIdx < 0) return null;
         const entry = host._trackLayout[layoutIdx];
         const candidates = [];
-        const addCandidate = (type, id, data, edge, edgeX, startFrame) => {
+        // A point in any item's middle is that item's, never a neighbour's
+        // edge: a wide neighbour's zone would otherwise cover a narrow item.
+        // An item that overlaps the middle's owner (legacy data) keeps its
+        // edges there, since trimming is how such an overlap is repaired.
+        const middleOwners = [];
+        const addCandidate = (type, id, data, edge, edgeX, startFrame, otherEdgeX) => {
+            const zone = trimZonePx(Math.abs(otherEdgeX - edgeX));
+            if (edge === "left" && x >= edgeX + zone && x <= otherEdgeX - zone) {
+                middleOwners.push({ data, x1: edgeX, x2: otherEdgeX });
+            }
             const distance = Math.abs(x - edgeX);
-            if (distance >= edgePx) return;
+            if (distance >= zone) return;
             candidates.push({
                 type,
                 id,
@@ -1752,6 +1769,8 @@ export function _hitTestEdge(host, x, rawY) {
                 startFrame,
                 distance,
                 selected: !!host._isSelected?.(type, id),
+                x1: Math.min(edgeX, otherEdgeX),
+                x2: Math.max(edgeX, otherEdgeX),
             });
         };
 
@@ -1760,8 +1779,8 @@ export function _hitTestEdge(host, x, rawY) {
                 if (!host._clipMatchesTrackEntry(clip, entry)) continue;
                 const x1 = host._frameToX(clip.timeline_start_frame);
                 const x2 = host._frameToX(clip.timeline_end_frame);
-                addCandidate("clip", clip.clip_id, clip, "left", x1, clip.timeline_start_frame);
-                addCandidate("clip", clip.clip_id, clip, "right", x2, clip.timeline_start_frame);
+                addCandidate("clip", clip.clip_id, clip, "left", x1, clip.timeline_start_frame, x2);
+                addCandidate("clip", clip.clip_id, clip, "right", x2, clip.timeline_start_frame, x1);
             }
         }
 
@@ -1770,8 +1789,8 @@ export function _hitTestEdge(host, x, rawY) {
                 if ((track.lane_index || 0) !== entry.laneIndex) continue;
                 const x1 = host._frameToX(track.timeline_start_frame);
                 const x2 = host._frameToX(track.timeline_end_frame);
-                addCandidate("audio", track.track_id, track, "left", x1, track.timeline_start_frame);
-                addCandidate("audio", track.track_id, track, "right", x2, track.timeline_start_frame);
+                addCandidate("audio", track.track_id, track, "left", x1, track.timeline_start_frame, x2);
+                addCandidate("audio", track.track_id, track, "right", x2, track.timeline_start_frame, x1);
             }
         }
 
@@ -1781,8 +1800,8 @@ export function _hitTestEdge(host, x, rawY) {
                 const section = sections[i];
                 const x1 = host._frameToX(section.start_frame);
                 const x2 = host._frameToX(section.end_frame);
-                addCandidate("prompt", i, section, "left", x1, section.start_frame);
-                addCandidate("prompt", i, section, "right", x2, section.start_frame);
+                addCandidate("prompt", i, section, "left", x1, section.start_frame, x2);
+                addCandidate("prompt", i, section, "right", x2, section.start_frame, x1);
             }
         }
 
@@ -1792,11 +1811,16 @@ export function _hitTestEdge(host, x, rawY) {
                 const bounds = referenceItemEffectiveBounds(item, host.totalFrames);
                 const x1 = host._frameToX(bounds.start);
                 const x2 = host._frameToX(bounds.end);
-                addCandidate("reference", item.reference_item_id, item, "left", x1, item.start_frame || 0);
-                addCandidate("reference", item.reference_item_id, item, "right", x2, item.start_frame || 0);
+                addCandidate("reference", item.reference_item_id, item, "left", x1, item.start_frame || 0, x2);
+                addCandidate("reference", item.reference_item_id, item, "right", x2, item.start_frame || 0, x1);
             }
         }
 
+        if (middleOwners.length) {
+            const reachable = candidates.filter((candidate) => middleOwners.every((owner) =>
+                owner.data === candidate.data || (owner.x1 < candidate.x2 && owner.x2 > candidate.x1)));
+            candidates.splice(0, candidates.length, ...reachable);
+        }
         candidates.sort((left, right) => {
             if (left.distance !== right.distance) return left.distance - right.distance;
             const leftSideRank = x < left.edgeX

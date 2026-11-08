@@ -363,3 +363,26 @@ def test_the_client_declines_exactly_the_linked_moves_the_server_refuses(
     assert bool(javascript) == python_refused, (
         f"{label}: client said {javascript!r}, server "
         f"{'refused' if python_refused else 'accepted'}")
+
+
+def test_a_scene_end_guide_is_read_at_its_shown_frame_on_both_sides():
+    """A guide pinned to the scene end is stored as -1. `_item_bounds` reads it
+    at `duration - 1`, so a linked move's delta is the distance the author
+    dragged; `memberBounds` must read it the same way."""
+    from server.routes import _item_bounds
+    for duration, frame in ((100, -1), (100, 40), (0, -1)):
+        scene = Scene(scene_id="s", duration_frames=duration,
+                      guide_frames=[GuideFrame(guide_id="g", frame_index=frame, asset_id="a")])
+        python = list(_item_bounds(scene, {"type": "guide", "id": "g"}))
+        node = shutil.which("node")
+        if not node:
+            pytest.skip("node is required for browser module tests")
+        script = f"""
+const mod = await import({json.dumps(MODULE_URL)});
+const at = mod.memberBounds("guide", {{ frame_index: {frame} }}, {{ sceneDuration: {duration} }});
+console.log(JSON.stringify([at.start, at.end]));
+"""
+        result = subprocess.run([node, "--input-type=module", "-e", script],
+                                capture_output=True, text=True, encoding="utf-8")
+        assert result.returncode == 0, result.stderr or result.stdout
+        assert json.loads(result.stdout) == python, (duration, frame)

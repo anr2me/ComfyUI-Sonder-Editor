@@ -276,3 +276,96 @@ def test_viewport_playback_callbacks_do_not_duplicate_toolbar_or_transport_updat
     assert "this._updateToolbar();" not in callback_source
     assert callback_source.count("this._updateTransportUI()") == 1
     assert "if (newFrame === this.playhead)" in source
+
+
+def test_a_narrow_item_keeps_a_middle_and_a_wide_neighbour_cannot_claim_it():
+    """Trim zones are capped at a third of the item's width, and a point in any
+    item's middle is never a neighbour's edge (UX pass phase 1)."""
+    module_url = (ROOT / "web" / "js" / "editor_timeline_canvas.js").as_uri()
+    script = f"""
+const mod = await import({json.dumps(module_url)});
+// 1 frame = 1 px: "wide" spans 100 px, "narrow" 6 px right after it.
+const clips = [
+    {{ clip_id: "wide", timeline_start_frame: 0, timeline_end_frame: 100, track_index: 0 }},
+    {{ clip_id: "narrow", timeline_start_frame: 100, timeline_end_frame: 106, track_index: 0 }},
+];
+const host = {{
+    activeScene: {{ clips, audio_tracks: [], prompt_sections: [] }},
+    _trackLayout: [{{ type: mod.TRACK_TYPE.VIDEO, laneIndex: 0, collapsed: false }}],
+    _layoutIndexFromRawY() {{ return 0; }},
+    _clipMatchesTrackEntry(clip, entry) {{ return clip.track_index === entry.laneIndex; }},
+    _frameToX(frame) {{ return frame; }},
+    _isSelected() {{ return false; }},
+}};
+const at = (x) => {{ const hit = mod._hitTestEdge(host, x, 30); return hit ? [hit.id, hit.edge] : null; }};
+console.log(JSON.stringify({{
+    zones: [mod.trimZonePx(300), mod.trimZonePx(6), mod.trimZonePx(0)],
+    narrowMiddle: at(103),
+    narrowRightEdge: at(105.5),
+    sharedEdge: at(100),
+    wideRightZone: at(95),
+    wideMiddle: at(50),
+}}));
+"""
+    result = json.loads(_run_node(script))
+
+    assert result["zones"] == [6, 2, 0]
+    # The narrow item's middle selects it; the wide item's 6 px zone, which
+    # reaches across all of it, no longer claims it.
+    assert result["narrowMiddle"] is None
+    assert result["narrowRightEdge"] == ["narrow", "right"]
+    assert result["sharedEdge"] is not None
+    assert result["wideRightZone"] == ["wide", "right"]
+    assert result["wideMiddle"] is None
+
+
+def test_an_edge_inside_an_overlapping_items_middle_stays_trimmable():
+    """Legacy overlap: B's left edge sits inside A's middle. Trimming is how
+    the overlap is repaired, so B's edge must still resolve there."""
+    module_url = (ROOT / "web" / "js" / "editor_timeline_canvas.js").as_uri()
+    script = f"""
+const mod = await import({json.dumps(module_url)});
+const clips = [
+    {{ clip_id: "a", timeline_start_frame: 0, timeline_end_frame: 100, track_index: 0 }},
+    {{ clip_id: "b", timeline_start_frame: 50, timeline_end_frame: 150, track_index: 0 }},
+];
+const host = {{
+    activeScene: {{ clips, audio_tracks: [], prompt_sections: [] }},
+    _trackLayout: [{{ type: mod.TRACK_TYPE.VIDEO, laneIndex: 0, collapsed: false }}],
+    _layoutIndexFromRawY() {{ return 0; }},
+    _clipMatchesTrackEntry(clip, entry) {{ return clip.track_index === entry.laneIndex; }},
+    _frameToX(frame) {{ return frame; }},
+    _isSelected() {{ return false; }},
+}};
+const hit = mod._hitTestEdge(host, 51, 30);
+console.log(JSON.stringify(hit ? [hit.id, hit.edge] : null));
+"""
+    assert json.loads(_run_node(script)) == ["b", "left"]
+
+
+def test_phase1_gesture_wiring_contracts():
+    """Source contracts for the UX pass phase 1 gestures. A behavioural check
+    lives in the live verification; these stop a silent revert."""
+    source = (ROOT / "web" / "js" / "editor_widget.js").read_text(encoding="utf-8")
+
+    # A modifier press never starts a trim, and selects the edge's item.
+    assert "const selectionModifier = e.ctrlKey || e.metaKey || e.shiftKey;" in source
+    assert "if (edgeHit && !selectionModifier) {" in source
+    assert "const hit = (edgeHit && selectionModifier)" in source
+    # A trim that moved nothing sends nothing and drops its own Undo entry.
+    assert "if (trimChangedBounds(trimInfo.type, trimInfo.data, trimInfo.origStart, trimInfo.origStoredEnd)) {" in source
+    assert "this._discardUnstampableUndoEntry(trimInfo.historyEntry);" in source
+    # A swap validates both destinations and never targets a linked/locked item.
+    assert "allFitsValid = !swapFitRefusal([" in source
+    assert "&& !this._isItemLocked(candidate) && !this._shouldApplyLinked(candidate)) {" in source
+    # A no-op trim then does what a body click does: the linked group, no stale editor.
+    assert "this.selectedItems = this._expandItemsWithLinked(this.selectedItems);\n                    this._hideItemEditor();" in source.replace("\r\n", "\n")
+    # The cursor follows the press: a modifier over an edge selects.
+    assert '(e.ctrlKey || e.metaKey || e.shiftKey) ? "grab" : "ew-resize"' in source
+    assert source.count("validate_lane_collision_after_batch: true") == 2
+    # A Guide drags from its shown frame and is named by its stored index.
+    assert "? this._resolvedGuideFrame(hit.data)" in source
+    assert "const oldIdx = orig.origFrameIndex ?? orig.origStart;" in source
+    # Set Reference to Selection goes through the staged-item writer.
+    assert '"set reference to selection", { writer: "timeline" });' in source
+    assert "timeline: Object.freeze({" in source
