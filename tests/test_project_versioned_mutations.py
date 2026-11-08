@@ -229,6 +229,107 @@ def test_concurrent_duplicates_do_not_collide_on_the_copy_name(tmp_path, monkeyp
     assert len(set(scene_ids)) == len(scene_ids), "duplicate minted a colliding scene id"
 
 
+def _project_with_linked_scene(tmp_path):
+    """A saved project whose one scene links a clip to its audio, with fields
+    from a newer version on the clip, the track, the group and a group item."""
+    from server.timeline_state import Scene
+
+    project = pm.create_project("Linked", 24, 512, 512, "free", str(tmp_path))
+    project_dir = project.project_dir
+    loaded = pm.load_project(project_dir)
+    loaded.add_scene(Scene.from_dict({
+        "scene_id": "source", "name": "Source", "duration_frames": 48,
+        "clips": [{"clip_id": "clip-1", "timeline_start_frame": 0, "timeline_end_frame": 24,
+                   "future_clip_field": "kept"}],
+        "audio_tracks": [{"track_id": "track-1", "timeline_start_frame": 0, "timeline_end_frame": 24,
+                          "future_track_field": "kept"}],
+        "linked_item_groups": [{"group_id": "g-1", "future_group_field": "kept", "items": [
+            {"type": "clip", "id": "clip-1", "future_ref_field": "kept"},
+            {"type": "audio", "id": "track-1"},
+        ]}],
+    }))
+    pm.save_project(loaded, notify=False)
+    return project_dir, Path(project_dir).name
+
+
+def _copy_of(project, source_id="source"):
+    copies = [scene for scene in project.scenes if scene.scene_id != source_id]
+    assert len(copies) == 1, [scene.name for scene in project.scenes]
+    return copies[0].to_dict()
+
+
+def test_a_duplicate_keeps_its_links_and_fields_from_a_newer_version_through_save_and_load(
+        tmp_path, monkeypatch):
+    """The copy's ids are minted before the scene is built, so the unknown-field
+    overlay can still match its records by id after the copy is saved."""
+    routes = _load_route_module(monkeypatch)
+    project_dir, dir_name = _project_with_linked_scene(tmp_path)
+    monkeypatch.setattr(routes, "_get_base_dir", lambda: str(tmp_path))
+    duplicate = _route_handler(
+        routes, "POST", "/sonder-editor/project/{project_id}/scenes/{scene_id}/duplicate")
+
+    response = asyncio.run(duplicate(DummyRequest(
+        match_info={"project_id": dir_name, "scene_id": "source"}, method="POST")))
+    assert response.status == 201
+
+    reloaded = pm.load_project(project_dir)
+    copy = _copy_of(reloaded)
+    clip, track = copy["clips"][0], copy["audio_tracks"][0]
+    assert clip["clip_id"] != "clip-1" and track["track_id"] != "track-1"
+    assert clip["future_clip_field"] == "kept"
+    assert track["future_track_field"] == "kept"
+    [group] = copy["linked_item_groups"]
+    assert group["group_id"] != "g-1"
+    assert group["future_group_field"] == "kept"
+    assert [(item["type"], item["id"]) for item in group["items"]] == [
+        ("clip", clip["clip_id"]), ("audio", track["track_id"])]
+    assert group["items"][0]["future_ref_field"] == "kept"
+    source = reloaded.get_scene("source").to_dict()
+    assert source["linked_item_groups"][0]["items"] == [
+        {"type": "clip", "id": "clip-1", "future_ref_field": "kept"},
+        {"type": "audio", "id": "track-1"}]
+
+
+def test_a_duplicate_retried_after_a_lost_race_links_the_ids_of_the_attempt_that_landed(
+        tmp_path, monkeypatch):
+    routes = _load_route_module(monkeypatch)
+    project_dir, dir_name = _project_with_linked_scene(tmp_path)
+    monkeypatch.setattr(routes, "_get_base_dir", lambda: str(tmp_path))
+
+    real_save = routes.save_project
+    attempts = []
+
+    def save_losing_the_first_race(saved, **kwargs):
+        # A load may also save (a load repair); only a save carrying the copy
+        # is a duplicate attempt.
+        if len(saved.scenes) < 2:
+            return real_save(saved, **kwargs)
+        attempts.append(_copy_of(saved))
+        if len(attempts) == 1:
+            other = pm.load_project(project_dir)
+            other.name = "Moved on"
+            pm.save_project(other, notify=False)
+        return real_save(saved, **kwargs)
+
+    monkeypatch.setattr(routes, "save_project", save_losing_the_first_race)
+    duplicate = _route_handler(
+        routes, "POST", "/sonder-editor/project/{project_id}/scenes/{scene_id}/duplicate")
+
+    response = asyncio.run(duplicate(DummyRequest(
+        match_info={"project_id": dir_name, "scene_id": "source"}, method="POST")))
+
+    assert response.status == 201
+    assert len(attempts) == 2, "the first commit should have lost the race and retried"
+    assert attempts[0]["clips"][0]["clip_id"] != attempts[1]["clips"][0]["clip_id"], (
+        "each attempt mints its own ids")
+    reloaded = pm.load_project(project_dir)
+    assert reloaded.name == "Moved on"
+    landed = _copy_of(reloaded)
+    assert landed["clips"][0]["clip_id"] == attempts[1]["clips"][0]["clip_id"]
+    assert [item["id"] for item in landed["linked_item_groups"][0]["items"]] == [
+        landed["clips"][0]["clip_id"], landed["audio_tracks"][0]["track_id"]]
+
+
 def test_deleting_an_already_deleted_scene_on_a_retry_reports_success(tmp_path, monkeypatch):
     """A completed delete must not be reported as a 404 just because we lost a race."""
     routes = _load_route_module(monkeypatch)

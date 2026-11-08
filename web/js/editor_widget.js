@@ -567,6 +567,7 @@ import {
     getRecommendedDurationSec,
     getMaxRes,
     MAX_SCENE_DURATION_FRAMES,
+    SCENE_DURATION_LIMIT_LABEL,
     resolveBatchChunkSizes,
     resolveFrameConstraintForTemplate,
     resolutionToolbarSelectionMemory,
@@ -2386,29 +2387,55 @@ export class EditorWidget {
                     // the opt-out dict rather than answered here.
                     coalesce: false,
                     reconcileFromResult: reconcileRetimedScene,
-                    failureTier: (error) => error?.code === "queue_jobs_pending"
-                        || error?.payload?.code === "duration_limit" ? "warning" : "error",
-                    failureMessage: (error) => error?.code === "queue_jobs_pending"
-                        || error?.payload?.code === "duration_limit"
-                        ? "Scene FPS change refused."
-                        : "Scene FPS change failed — timeline restored.",
-                    // A retime scales the duration, so a faster rate can carry
-                    // it past the cap. Read from `error.payload.code`: the
-                    // `error.code` arms here never match a real response
-                    // (Bug Tracker, "The FPS gesture's `queue_jobs_pending`
-                    // arms read `error?.code`").
-                    failureDetail: (error) => error?.code === "queue_jobs_pending"
-                        ? "This scene has pending or running queue jobs. Finish or clear them before changing FPS so their frozen frame ranges stay valid."
-                        : error?.payload?.code === "duration_limit"
-                            ? `This FPS would make the scene longer than ${MAX_SCENE_DURATION_FRAMES} frames.`
-                            : null,
+                    failureTier: (error) =>
+                        this._sceneFpsRefusalNotice(error, newEffectiveFps)?.tier || "error",
+                    failureMessage: (error) =>
+                        this._sceneFpsRefusalNotice(error, newEffectiveFps)?.message
+                        || "Scene FPS change failed — timeline restored.",
+                    failureDetail: (error) =>
+                        this._sceneFpsRefusalNotice(error, newEffectiveFps)?.detail || null,
                 }
             );
         } catch (e) {
+            // The number input's `change` handler already shows the refused
+            // value, and a refusal leaves `activeScene.fps` untouched (the
+            // retime is applied only from the response), so this puts the
+            // stored rate back at once. A value typed but not yet committed
+            // while the request was in flight is overwritten; accepted. A write
+            // that committed but failed in the queue's post-commit bookkeeping
+            // also lands here and briefly shows the old rate, until the error
+            // path's scenes refresh adopts the server's.
+            if (this.activeSceneId === sceneId) this._syncSceneFpsControl();
             console.warn("[Sonder] Failed to update scene FPS:", e);
         } finally {
             this._fpsUpdatePending = false;
         }
+    }
+
+    /** The one toast for a refused scene FPS change, or null for any other failure.
+     *
+     *  A route's own code is on `error.payload.code`: `api_client.js` lifts only a
+     *  version conflict's code onto `error.code`, so reading `error.code` here can
+     *  never match a real refusal. `fps` is the effective rate that was requested.
+     */
+    _sceneFpsRefusalNotice(error, fps) {
+        const code = error?.payload?.code;
+        if (code === "queue_jobs_pending") {
+            return {
+                tier: "warning",
+                message: "Scene FPS change refused.",
+                detail: "This scene has queued or running render jobs. Try again once they finish, or remove them from the Render Queue.",
+            };
+        }
+        if (code === "duration_limit") {
+            const rate = this._formatSceneFpsValue(fps);
+            return {
+                tier: "warning",
+                message: "Scene FPS change refused.",
+                detail: `At ${rate} fps this scene would run past the ${SCENE_DURATION_LIMIT_LABEL}-frame limit. Choose a lower FPS or shorten the scene first.`,
+            };
+        }
+        return null;
     }
 
     _cycleScene(dir) {
@@ -2493,7 +2520,7 @@ export class EditorWidget {
     /** Warn and return true when `frames` exceeds the authored-duration cap. */
     _refuseSceneDurationOverCap(frames) {
         if (!(frames > MAX_SCENE_DURATION_FRAMES)) return false;
-        notifyWarning(`A scene may be at most ${MAX_SCENE_DURATION_FRAMES} frames long.`,
+        notifyWarning(`A scene may be at most ${SCENE_DURATION_LIMIT_LABEL} frames long.`,
             { source: "scene-duration-limit" });
         return true;
     }
@@ -2538,7 +2565,7 @@ export class EditorWidget {
                         ? "Scene duration change refused."
                         : "scene duration failed — timeline restored.",
                     failureDetail: (error) => error?.payload?.code === "duration_limit"
-                        ? `A scene may be at most ${MAX_SCENE_DURATION_FRAMES} frames long.`
+                        ? `A scene may be at most ${SCENE_DURATION_LIMIT_LABEL} frames long.`
                         : null,
                     // Only the head of a coalesced group may roll back. The queue
                     // replaces the older intent outright and settles every collapsed

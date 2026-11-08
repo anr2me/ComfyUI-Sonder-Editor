@@ -33,6 +33,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 WIDGET_URL = (ROOT / "web" / "js" / "editor_widget.js").as_uri()
 NOTES_URL = (ROOT / "web" / "js" / "editor_notifications.js").as_uri()
+API_URL = (ROOT / "web" / "js" / "api_client.js").as_uri()
+SETTINGS_URL = (ROOT / "web" / "js" / "editor_settings.js").as_uri()
 
 SCRIPT = r"""
 globalThis.document = { createElement: () => ({ style: {}, appendChild() {}, addEventListener() {} }),
@@ -45,6 +47,8 @@ globalThis.requestAnimationFrame = () => 0;
 
 const { EditorWidget } = await import(__WIDGET__);
 const notes = await import(__NOTES__);
+const { fetchProjectJson } = await import(__API__);
+const { SCENE_DURATION_LIMIT_LABEL } = await import(__SETTINGS__);
 const toasts = [];
 const seen = new Set();
 let live = [];
@@ -122,17 +126,79 @@ await scenario("gesture_messages", async () => {
   };
 });
 
+// The error objects come from the real `fetchProjectJson` answering a stubbed
+// `fetch`, so these cases pin the shape a refusal actually has. The old arms
+// read `error.code`, which only a version conflict ever carries.
+async function realError(status, body) {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => {
+    if (status === "network") throw new TypeError("Failed to fetch");
+    return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    await fetchProjectJson("/sonder-editor/project/project/scenes/scene/mutations", { method: "POST" },
+      { projectId: "project" });
+    return null;
+  } catch (error) {
+    return error;
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
 await scenario("fps_messages", async () => {
   const { w, options } = widget();
   await w._updateSceneFpsWithinGesture(48);
   const opts = options[0] || {};
-  const refused = { status: 400, payload: { code: "duration_limit" } };
-  return {
-    message: opts.failureMessage?.(refused) ?? null,
-    detail: opts.failureDetail?.(refused) ?? null,
-    tier: opts.failureTier?.(refused) ?? null,
+  const read = (error) => ({
+    tier: opts.failureTier?.(error) ?? null,
+    message: opts.failureMessage?.(error) ?? null,
+    detail: opts.failureDetail?.(error) ?? null,
+  });
+  const cases = {
+    jobs: await realError(409, { error: "Finish or clear queued jobs for this scene before changing FPS", code: "queue_jobs_pending" }),
+    cap: await realError(400, { error: "A scene may be at most 99999 frames long.", code: "duration_limit" }),
+    conflict: await realError(409, { error: "Project changed", code: "project_version_conflict" }),
+    server: await realError(500, { error: "boom" }),
+    network: await realError("network"),
   };
+  const result = { label: SCENE_DURATION_LIMIT_LABEL };
+  for (const [key, error] of Object.entries(cases)) {
+    result[key] = { ...read(error), errorCode: error?.code ?? null, isError: error instanceof Error };
+  }
+  return result;
 });
+
+await scenario("fps_messages_inherit", async () => {
+  // An inherit (0) names the project rate it resolves to, not "0".
+  const { w, options } = widget();
+  w.fps = 50;
+  await w._updateSceneFpsWithinGesture(0);
+  const cap = await realError(400, { error: "cap", code: "duration_limit" });
+  return { detail: options[0]?.failureDetail?.(cap) ?? null };
+});
+
+await scenario("fps_messages_fractional", async () => {
+  const { w, options } = widget();
+  await w._updateSceneFpsWithinGesture(29.97002997);
+  const cap = await realError(400, { error: "cap", code: "duration_limit" });
+  return { detail: options[0]?.failureDetail?.(cap) ?? null };
+});
+
+for (const [name, switchScene] of [["fps_refusal_resyncs", false], ["fps_refusal_after_switch", true]]) {
+  await scenario(name, async () => {
+    const { w } = widget();
+    let syncs = 0;
+    w._syncSceneFpsControl = () => { syncs += 1; };
+    const refusal = await realError(409, { error: "jobs", code: "queue_jobs_pending" });
+    w._runSceneMutation = () => {
+      if (switchScene) w.activeSceneId = "other";
+      return Promise.reject(refusal);
+    };
+    await w._updateSceneFpsWithinGesture(48);
+    return { syncs, pendingCleared: w._fpsUpdatePending === false };
+  });
+}
 
 for (const [name, item, edge] of [
   ["trim_past_end_right", { start_frame: 120, end_frame: 160, lane_index: 0 }, "right"],
@@ -176,6 +242,7 @@ for (const [name, item, edge] of [
   };
 }
 
+out.label = SCENE_DURATION_LIMIT_LABEL;
 console.log(JSON.stringify(out));
 """
 
@@ -186,7 +253,9 @@ def results():
     if not node:
         pytest.skip("node is required for the duration client tests")
     script = (SCRIPT.replace("__WIDGET__", json.dumps(WIDGET_URL))
-              .replace("__NOTES__", json.dumps(NOTES_URL)))
+              .replace("__NOTES__", json.dumps(NOTES_URL))
+              .replace("__API__", json.dumps(API_URL))
+              .replace("__SETTINGS__", json.dumps(SETTINGS_URL)))
     result = subprocess.run([node, "--input-type=module"], input=script,
                             capture_output=True, text=True, encoding="utf-8", cwd=ROOT)
     assert result.returncode == 0, result.stderr
@@ -207,7 +276,8 @@ def test_a_value_past_the_cap_is_refused_before_anything_changes(results, name):
     assert str(case["field"]) == expected_field, "the field shows the kept duration"
     toasts = _limit_toasts(case)
     assert len(toasts) == 1 and toasts[0]["tier"] == "warning"
-    assert "99999" in toasts[0]["message"]
+    assert results["label"] == "99,999"
+    assert results["label"] in toasts[0]["message"]
 
 
 def test_a_value_at_the_cap_is_written(results):
@@ -247,16 +317,60 @@ def test_a_server_refusal_of_the_duration_says_why(results):
     case = results["gesture_messages"]
     assert case["tier"] == "warning"
     assert case["message"] == "Scene duration change refused."
-    assert "99999" in case["detail"]
+    assert results["label"] in case["detail"]
     assert case["otherMessage"] == "scene duration failed — timeline restored.", (
         "any other failure keeps the default sentence")
 
 
-def test_a_server_refusal_of_an_fps_retime_says_why(results):
-    case = results["fps_messages"]
+def test_a_server_refusal_of_an_fps_retime_names_the_cap_and_the_remedy(results):
+    case = results["fps_messages"]["cap"]
+    assert case["isError"] and case["errorCode"] is None, (
+        "the route's code is on error.payload, not error.code")
     assert case["tier"] == "warning"
-    assert "FPS" in case["message"]
-    assert "99999" in (case["detail"] or "")
+    assert case["message"] == "Scene FPS change refused."
+    assert case["detail"] == (
+        "At 48 fps this scene would run past the 99,999-frame limit. "
+        "Choose a lower FPS or shorten the scene first.")
+
+
+def test_an_fps_change_refused_for_pending_jobs_says_when_to_retry(results):
+    """Bug Tracker, "The FPS gesture's `queue_jobs_pending` arms read `error?.code`"."""
+    case = results["fps_messages"]["jobs"]
+    assert case["isError"] and case["errorCode"] is None
+    assert case["tier"] == "warning"
+    assert case["message"] == "Scene FPS change refused."
+    assert case["detail"] == (
+        "This scene has queued or running render jobs. "
+        "Try again once they finish, or remove them from the Render Queue.")
+
+
+@pytest.mark.parametrize("key", ["conflict", "server", "network"])
+def test_any_other_fps_failure_keeps_the_generic_error(results, key):
+    case = results["fps_messages"][key]
+    assert case["isError"]
+    assert case["tier"] == "error"
+    assert case["message"] == "Scene FPS change failed — timeline restored."
+    assert case["detail"] is None
+
+
+def test_the_cap_detail_names_the_rate_as_the_control_shows_it(results):
+    assert results["fps_messages_fractional"]["detail"].startswith("At 29.97 fps ")
+
+
+def test_the_cap_detail_for_an_inherited_rate_names_the_project_rate(results):
+    assert results["fps_messages_inherit"]["detail"].startswith("At 50 fps ")
+
+
+def test_a_refused_fps_change_puts_the_stored_rate_back_in_the_control(results):
+    case = results["fps_refusal_resyncs"]
+    assert case["syncs"] == 1
+    assert case["pendingCleared"]
+
+
+def test_a_refusal_landing_after_a_scene_switch_leaves_the_new_scene_control_alone(results):
+    case = results["fps_refusal_after_switch"]
+    assert case["syncs"] == 0
+    assert case["pendingCleared"]
 
 
 @pytest.mark.parametrize(("name", "refused"), [

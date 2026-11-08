@@ -18,6 +18,8 @@ a fresh `[Unreleased]` block.
 - Clicking a timeline item too narrow to show its middle selects it, and Ctrl- or Shift-click adds it to the selection. A narrow item keeps a middle you can drag to move it; zoom in to trim one. Grabbing an edge and letting go without moving it no longer saves anything or adds an Undo step.
 - Dropping a clip on another clip of a different length no longer leaves them overlapping. On one lane the two trade places within the space they already cover; across lanes a swap that would land on another item is refused, and the drag stays where it last fit. A linked or locked clip is no longer swapped.
 - Dragging a guide that sits at the scene end now starts from where it is shown, instead of jumping to the start of the scene. A linked partner moves by the same distance.
+- Duplicating a scene keeps its linked clips and audio linked in the copy, as links of its own, and keeps any clip or audio settings saved by a newer Sonder version.
+- A refused scene FPS change now says why. With render jobs queued or running for the scene, it says to try again once they finish or are removed from the Render Queue; when the new rate would make the scene longer than 99,999 frames, it names the limit and suggests a lower FPS or a shorter scene. Either way the FPS control returns to the scene's rate.
 
 ## [0.8.3] - 2026-11-05
 

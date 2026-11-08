@@ -14659,12 +14659,59 @@ if routes is not None:
 
             payload = source_scene.to_dict()
             payload.pop("scene_id", None)
-            for clip_payload in payload.get("clips", []) or []:
-                if isinstance(clip_payload, dict):
-                    clip_payload.pop("clip_id", None)
-            for track_payload in payload.get("audio_tracks", []) or []:
-                if isinstance(track_payload, dict):
-                    track_payload.pop("track_id", None)
+            # The copy's clip, audio and link-group ids are minted HERE, into the
+            # payload, rather than left for `Scene.from_dict` to default. Two
+            # things need the new ids before the scene is built: the link groups,
+            # whose clip/audio refs are remapped below (left unmapped, the
+            # normalizer drops every one of them), and the unknown-field overlay,
+            # which matches the copy's `_raw_data` to its canonical records by id
+            # (an id-less raw record matches nothing, so the first save of the
+            # copy would drop fields a newer version wrote). Ids are unique
+            # project-wide, because `project_commit.snapshot_item_ids` keeps
+            # clip, track and group ids as project-wide sets. Guide and
+            # prompt-section ids are copied unchanged, so refs to them need no
+            # remap. Limit: an unknown future field that names a clip is copied
+            # verbatim and cannot be remapped.
+            taken_ids = set()
+            for scene in project.scenes:
+                taken_ids.update(str(clip.clip_id) for clip in scene.clips)
+                taken_ids.update(str(track.track_id) for track in scene.audio_tracks)
+                taken_ids.update(
+                    str(group.get("group_id") or "")
+                    for group in getattr(scene, "linked_item_groups", []) or []
+                    if isinstance(group, dict))
+
+            def mint_copy_id() -> str:
+                while True:
+                    candidate = uuid.uuid4().hex[:8]
+                    if candidate not in taken_ids:
+                        taken_ids.add(candidate)
+                        return candidate
+
+            link_item_id_map = {"clip": {}, "audio": {}}
+            for field_name, id_key, item_type in (
+                ("clips", "clip_id", "clip"),
+                ("audio_tracks", "track_id", "audio"),
+            ):
+                for item_payload in payload.get(field_name, []) or []:
+                    if not isinstance(item_payload, dict):
+                        continue
+                    previous_id = str(item_payload.get(id_key) or "")
+                    next_id = mint_copy_id()
+                    item_payload[id_key] = next_id
+                    if previous_id:
+                        link_item_id_map[item_type][previous_id] = next_id
+            for group_payload in payload.get("linked_item_groups", []) or []:
+                if not isinstance(group_payload, dict):
+                    continue
+                group_payload["group_id"] = mint_copy_id()
+                for item in group_payload.get("items", []) or []:
+                    if not isinstance(item, dict):
+                        continue
+                    id_map = link_item_id_map.get(str(item.get("type") or ""))
+                    item_id = str(item.get("id") or "")
+                    if id_map is not None and item_id in id_map:
+                        item["id"] = id_map[item_id]
             reference_item_id_map = {}
             for item_payload in payload.get("reference_items", []) or []:
                 if isinstance(item_payload, dict):

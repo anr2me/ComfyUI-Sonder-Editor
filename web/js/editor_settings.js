@@ -18,6 +18,8 @@ const SETTINGS_VERSION = 1;
 // `MAX_SCENE_DURATION_FRAMES` in `server/routes.py`, and
 // `tests/test_scene_duration_cap.py` keeps the two equal.
 export const MAX_SCENE_DURATION_FRAMES = 99999;
+// The cap as every duration and FPS-refusal toast shows it ("99,999").
+export const SCENE_DURATION_LIMIT_LABEL = MAX_SCENE_DURATION_FRAMES.toLocaleString("en-US");
 
 export const GALLERY_SORT_OPTIONS = [
     { value: "newest", label: "Newest" },

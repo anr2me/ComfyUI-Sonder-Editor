@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -496,9 +497,12 @@ def test_timeline_fps_frontend_semantics_are_wired_at_all_boundaries():
     # dedicated timebase transaction can record the complete transformation.
     assert '_pushUndo("change fps")' not in fps_source
     assert "reconcileFromResult: reconcileRetimedScene" in fps_source
-    assert "queue_jobs_pending" in fps_source
-    assert "Scene FPS change refused." in fps_source
-    assert "pending or running queue jobs" in fps_source
+    # The refusal messages are behaviour, driven through real `fetchProjectJson`
+    # errors in `test_scene_duration_client_js.py`. This only keeps the dead
+    # arm from returning: a route's code is never on `error.code`.
+    assert "_sceneFpsRefusalNotice(error, newEffectiveFps)" in fps_source
+    assert not re.search(r'\.code\s*===\s*"queue_jobs_pending"|"queue_jobs_pending"\s*===\s*\S*\.code\b',
+                         widget_source)
     assert "if (this._fpsUpdatePending)" in fps_source
     assert "coalesce: false" in fps_source
     assert "refreshScenes: false" not in fps_source

@@ -1895,10 +1895,15 @@ def test_duplicate_scene_route_deep_copies_scene_and_regenerates_child_ids(tmp_p
         PromptSection(start_frame=24, end_frame=48, prompt="section two",
                       attachments=[linked_reference_attachment]),
     ]
+    source.prompt_sections[0].prompt_id = "prompt-1"
     source.reference_items = [ReferenceItem(
         reference_item_id="reference-item", lane_index=0,
         start_frame=0, end_frame=24, members=[])]
-    source.guide_frames = [GuideFrame(frame_index=8, asset_id="guide-1", source="asset", strength=0.75)]
+    source.guide_frames = [
+        GuideFrame(guide_id="guide-a", frame_index=8, asset_id="guide-1", source="asset", strength=0.75),
+        GuideFrame(guide_id="guide-b", frame_index=12, asset_id="guide-1", source="asset"),
+        GuideFrame(guide_id="guide-c", frame_index=16, asset_id="guide-1", source="asset"),
+    ]
     source.clips = [
         ClipReference(
             clip_id="clip-1",
@@ -1919,7 +1924,11 @@ def test_duplicate_scene_route_deep_copies_scene_and_regenerates_child_ids(tmp_p
             takes=["take-a"],
             active_take=0,
             take_metadata={"scene_id": "scene-1"},
-        )
+        ),
+        ClipReference(clip_id="clip-2", source_path="media/b.mp4",
+                      timeline_start_frame=20, timeline_end_frame=30, track_index=0),
+        ClipReference(clip_id="clip-3", source_path="media/c.mp4",
+                      timeline_start_frame=30, timeline_end_frame=40, track_index=0),
     ]
     source.audio_tracks = [
         AudioTrack(
@@ -1943,11 +1952,25 @@ def test_duplicate_scene_route_deep_copies_scene_and_regenerates_child_ids(tmp_p
     source.saved_selections = [
         {"name": "Sel", "start": 4, "end": 20, "pre_context_frames": 2, "post_context_frames": 3}
     ]
+    # One group of each shape the duplicate must carry over: clip/audio ids are
+    # re-minted and remapped, Guide and prompt ids are copied unchanged.
+    source.linked_item_groups = source._normalize_linked_item_groups([
+        {"group_id": "g-av", "items": [{"type": "clip", "id": "clip-1"}, {"type": "audio", "id": "track-1"}]},
+        {"group_id": "g-cg", "items": [{"type": "clip", "id": "clip-2"}, {"type": "guide", "id": "guide-a"}]},
+        {"group_id": "g-gg", "items": [{"type": "guide", "id": "guide-b"}, {"type": "guide", "id": "guide-c"}]},
+        {"group_id": "g-cp", "items": [{"type": "clip", "id": "clip-3"}, {"type": "prompt", "id": "prompt-1"}]},
+    ])
+    assert len(source.linked_item_groups) == 4
+    source_groups_before = copy.deepcopy(source.linked_item_groups)
     project = TimelineProject(
         project_dir=str(project_dir),
         name="Project",
         scenes=[Scene(scene_id="scene-0", name="Other", order=1), source],
     )
+    ids_before = ({clip.clip_id for scene in project.scenes for clip in scene.clips}
+                  | {track.track_id for scene in project.scenes for track in scene.audio_tracks}
+                  | {group["group_id"] for scene in project.scenes
+                     for group in scene.linked_item_groups})
 
     monkeypatch.setattr(route_module, "_load_project_from_request", lambda request: project)
     monkeypatch.setattr(route_module, "save_project", lambda project, **kwargs: None)
@@ -2010,6 +2033,70 @@ def test_duplicate_scene_route_deep_copies_scene_and_regenerates_child_ids(tmp_p
     assert payload["clips"][0]["source_path"] == source.clips[0].source_path
     assert payload["clips"][0]["role"] == source.clips[0].role
     assert payload["audio_tracks"][0]["source_path"] == source.audio_tracks[0].source_path
+
+    # Link groups: all four survive, naming the copy's own clips and audio.
+    clip_map = {old.clip_id: new["clip_id"] for old, new in zip(source.clips, payload["clips"])}
+    track_map = {old.track_id: new["track_id"]
+                 for old, new in zip(source.audio_tracks, payload["audio_tracks"])}
+    expected = []
+    for group in source_groups_before:
+        expected.append([
+            {"type": item["type"],
+             "id": {"clip": clip_map, "audio": track_map}.get(item["type"], {}).get(item["id"], item["id"])}
+            for item in group["items"]
+        ])
+    assert [group["items"] for group in payload["linked_item_groups"]] == expected
+    assert expected[0] == [{"type": "clip", "id": clip_map["clip-1"]},
+                           {"type": "audio", "id": track_map["track-1"]}]
+    assert expected[2] == source_groups_before[2]["items"], "Guide ids are copied unchanged"
+    copy_group_ids = [group["group_id"] for group in payload["linked_item_groups"]]
+    assert len(set(copy_group_ids)) == 4
+    minted = set(clip_map.values()) | set(track_map.values()) | set(copy_group_ids)
+    assert minted.isdisjoint(ids_before), "a minted id collides with one already in the project"
+    # The stored copy is the one the response describes, and the source is untouched.
+    stored_copy = project.get_scene(payload["scene_id"])
+    assert stored_copy.linked_item_groups == payload["linked_item_groups"]
+    assert source.linked_item_groups == source_groups_before
+    stored_copy.linked_item_groups[0]["items"].pop()
+    assert source.linked_item_groups == source_groups_before, "the copy shares a group object"
+
+
+def test_duplicate_scene_skips_ids_already_in_the_project_or_minted_this_copy(tmp_path, monkeypatch):
+    """A minted id never repeats one held by another scene, or one this copy already took."""
+    route_module = _load_route_module(monkeypatch)
+    source = Scene(scene_id="scene-1", name="Scene", duration_frames=48)
+    source.clips = [ClipReference(clip_id="clip-1", timeline_start_frame=0, timeline_end_frame=10)]
+    source.audio_tracks = [AudioTrack(track_id="track-1", timeline_start_frame=0, timeline_end_frame=10)]
+    source.linked_item_groups = source._normalize_linked_item_groups([
+        {"group_id": "g-1", "items": [{"type": "clip", "id": "clip-1"}, {"type": "audio", "id": "track-1"}]},
+    ])
+    other = Scene(scene_id="scene-0", name="Other", order=1)
+    other.clips = [ClipReference(clip_id="aaaaaaaa", timeline_start_frame=0, timeline_end_frame=10)]
+    project = TimelineProject(project_dir=str(tmp_path), name="Project", scenes=[other, source])
+    monkeypatch.setattr(route_module, "_load_project_from_request", lambda request: project)
+    monkeypatch.setattr(route_module, "save_project", lambda project, **kwargs: None)
+
+    # Only the route's own `uuid` is replaced. The first candidate collides with
+    # the other scene's clip, and each next one repeats the id just minted.
+    import uuid as real_uuid
+    scripted = ["aaaaaaaa", "bbbbbbbb", "bbbbbbbb", "cccccccc", "cccccccc", "dddddddd"]
+
+    def scripted_uuid4():
+        if scripted:
+            return SimpleNamespace(hex=scripted.pop(0) + "0" * 24)
+        return real_uuid.uuid4()
+
+    monkeypatch.setattr(route_module, "uuid", SimpleNamespace(uuid4=scripted_uuid4))
+    duplicate_scene = _route_handler(
+        route_module, "POST", "/sonder-editor/project/{project_id}/scenes/{scene_id}/duplicate")
+    response = asyncio.run(duplicate_scene(DummyRequest(match_info={"scene_id": "scene-1"})))
+    payload = _response_json(response)
+
+    assert response.status == 201
+    assert payload["clips"][0]["clip_id"] == "bbbbbbbb"
+    assert payload["audio_tracks"][0]["track_id"] == "cccccccc"
+    assert payload["linked_item_groups"] == [{"group_id": "dddddddd", "items": [
+        {"type": "clip", "id": "bbbbbbbb"}, {"type": "audio", "id": "cccccccc"}]}]
 
 
 def test_guide_swap_operation_swaps_frames_and_respects_lock(tmp_path, monkeypatch):
