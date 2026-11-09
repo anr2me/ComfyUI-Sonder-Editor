@@ -74,6 +74,7 @@ import {
     countAttachedReferenceChips,
     deriveReferencePrompt,
     referenceLiveOutputs,
+    referenceMemberDisplayNames,
     resolveReferenceVerdicts,
 } from "./reference_resolution.js";
 import { notifySuccess, notifyWarning } from "./editor_notifications.js";
@@ -174,6 +175,13 @@ const button = (label, title, variant = "secondary") => {
     return node;
 };
 
+/** Name a control by what it is, so a rebuild can give focus back to its
+ *  replacement. Keys are unique within the panel (a test holds them to it). */
+const keyed = (node, key) => {
+    node.dataset.focusKey = String(key);
+    return node;
+};
+
 const sectionTitle = (text) => el("div", text, `
     font-size:10px; font-weight:700; letter-spacing:0.08em; text-transform:uppercase;
     color:${COLORS.textMuted}; margin:2px 0 2px;
@@ -211,16 +219,23 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
         renderedLaneCount: 0,
         // `recipeFormShape` of the recipe form as last drawn.
         drawnFormShape: "",
-        // The lane (`{ key: laneMemoryKey(), index }`) whose invalid controls
-        // have had their one autofocus, for the recipe form and for the items.
-        // An invalid control is focused on a lane's first draw only: the host's
+        // The lane (`{ key: laneMemoryKey(), index }`) that has had its one
+        // autofocus of the first invalid control. Once per lane: the host's
         // gated refresh redraws after every write, and focusing on each redraw
         // would steal the author's focus -- and, since the gate does not
         // rebuild a panel holding a focused field, pin the panel stale behind
-        // it. The items' turn is spent only on a draw that could judge a role
-        // (the Prompt Format catalog ready), so a lane first drawn while the
-        // catalog loads still gets it once.
-        autofocused: { recipe: null, items: null },
+        // it. The turn is spent only once the Prompt Format catalog has
+        // settled, so a role can be judged: a lane first drawn while it loads
+        // gets its turn when it arrives, and an invalid recipe field cannot
+        // take it early from a role drawn above it. A catalog that failed to
+        // load spends it on the recipe fields alone.
+        autofocused: null,
+        // The lane whose autofocus is due but has not run yet. One microtask
+        // runs it after the render that queued it, on whatever that lane's
+        // latest render drew -- one decision, so the last invalid control
+        // can no longer win by focusing last.
+        autofocusPending: null,
+        autofocusQueued: false,
     };
     const storedLaneId = (index = state.laneIndex) => String(
         host.activeScene?.reference_lane_recipes?.[index]?.lane_id || "").trim();
@@ -271,8 +286,6 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
         disclosureMemory.remember(disclosureKey(kind, value), open);
     };
     let mounted = true;
-    // Whether the render in progress may autofocus (`state.autofocused`).
-    let autofocusDue = { recipe: false, items: false };
 
     const close = () => {
         if (!mounted) return;
@@ -601,7 +614,8 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
             `);
             chip.appendChild(el("span", tagWithId(tag)));
             if (!locked) {
-                const drop = el("button", "×", chromeButtonCss({ variant: "tertiary", padding: "0 3px", fontSize: "10px", radius: "8px" }));
+                const drop = keyed(el("button", "×", chromeButtonCss({ variant: "tertiary", padding: "0 3px", fontSize: "10px", radius: "8px" })),
+                    `recipe:${field.key}:drop:${tag}`);
                 drop.title = `Remove ${tag}`;
                 drop.addEventListener("click", () => {
                     chip.remove();
@@ -614,7 +628,8 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
         for (const tag of tags) wrap.appendChild(chipFor(tag));
         if (locked) return wrap;
 
-        const input = el("input", "", chromeInputCss({ padding: "3px 6px", fontSize: "11px" }) + "width:150px;");
+        const input = keyed(el("input", "", chromeInputCss({ padding: "3px 6px", fontSize: "11px" }) + "width:150px;"),
+            `recipe:${field.key}:add`);
         input.placeholder = "add tag — Tab completes";
         const completionFor = (typed) => {
             const needle = typed.trim().toLowerCase();
@@ -714,7 +729,7 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
         const known = new Set(choices.map((entry) => entry.value));
         for (const entry of choices) {
             const label = el("label", "", `display:flex;align-items:center;gap:4px;font-size:11px;color:${COLORS.text};`);
-            const box = el("input");
+            const box = keyed(el("input"), `recipe:${field.key}:${entry.value}`);
             box.type = "checkbox";
             box.checked = selected.includes(entry.value);
             box.disabled = locked;
@@ -737,7 +752,8 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
             `);
             unsupported.title = "This saved value is preserved, but the recipe cannot be saved again until it is removed or rebound.";
             if (!locked) {
-                const remove = button("Remove", `Remove unsupported value ${value}`, "danger");
+                const remove = keyed(button("Remove", `Remove unsupported value ${value}`, "danger"),
+                    `recipe:${field.key}:remove:${value}`);
                 remove.style.padding = "0 4px";
                 remove.addEventListener("click", () => applyField(
                     field, currentList(field).filter((entry) => entry !== value)));
@@ -752,7 +768,7 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
         const value = readField(recipe, field);
         const inputCss = chromeInputCss({ padding: "3px 6px", fontSize: "11px" });
         if (field.type === "bool") {
-            const box = el("input");
+            const box = keyed(el("input"), `recipe:${field.key}`);
             box.type = "checkbox";
             box.checked = !!value;
             box.disabled = locked;
@@ -761,7 +777,8 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
         }
         if (field.type === "enum") {
             const wrap = el("div", "", "display:flex;flex-direction:column;gap:3px;flex:1;min-width:0;");
-            const select = el("select", "", chromeSelectCss({ padding: "3px 6px", fontSize: "11px" }));
+            const select = keyed(el("select", "", chromeSelectCss({ padding: "3px 6px", fontSize: "11px" })),
+                `recipe:${field.key}`);
             for (const option of field.values || []) {
                 const node = el("option", option);
                 node.value = option;
@@ -803,7 +820,7 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
             const declared = Array.isArray(value) ? value : null;
             for (const name of field.values || []) {
                 const label = el("label", "", `display:flex;align-items:center;gap:4px;font-size:11px;color:${COLORS.text};`);
-                const box = el("input");
+                const box = keyed(el("input"), `recipe:${field.key}:${name}`);
                 box.type = "checkbox";
                 // No declaration at all means "every output live" — the
                 // detached escape hatch — so an unauthored recipe shows all on.
@@ -824,7 +841,7 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
             }
             return wrap;
         }
-        const input = el("input", "", inputCss + "width:170px;");
+        const input = keyed(el("input", "", inputCss + "width:170px;"), `recipe:${field.key}`);
         input.disabled = locked;
         if (field.type === "int" || field.type === "number") {
             input.type = "number";
@@ -890,7 +907,8 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
 
         const templateRow = el("div", "", "display:flex;align-items:center;gap:8px;flex-wrap:wrap;");
         templateRow.appendChild(el("span", "Template", `font-size:11px;color:${COLORS.textMuted};min-width:64px;`));
-        const select = el("select", "", chromeSelectCss({ padding: "4px 7px", fontSize: "11px" }) + "min-width:240px;");
+        const select = keyed(el("select", "", chromeSelectCss({ padding: "4px 7px", fontSize: "11px" }) + "min-width:240px;"),
+            "template");
         select.dataset.sonderReferenceTemplate = "1";
         const normalizeKind = (kind) => ["image", "video", "audio"].includes(kind) ? kind : "image";
         const laneKind = normalizeKind(recipe.media_kind);
@@ -970,24 +988,22 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
             if (keyboardPending) rememberSelection();
             else commitTemplate();
         });
-        // A structural write repaints the panel, which removes the control
-        // focus was moving to. Restore focus to the control at the same
-        // distance from the template select.
-        const focusables = () => [...panel.querySelectorAll("button,select,input,textarea,[tabindex]")]
-            .filter((node) => !node.disabled && node.tabIndex >= 0);
+        // Leaving the select commits, and the structural write repaints the
+        // panel, which replaces the control focus was moving to. Focus goes to
+        // that control's replacement, by key, or -- when the new template drew
+        // no such control (Edit as custom under a detached lane) -- back to
+        // the Template select, the control the author just used. Focus moving
+        // nowhere in the panel (a window blur, a click on blank space or the
+        // backdrop) is left alone.
         select.addEventListener("blur", (event) => {
             if (state.rendering || select.value === committedValue) return;
             const next = event.relatedTarget;
-            const before = focusables();
-            const offset = next && panel.contains(next)
-                ? before.indexOf(next) - before.indexOf(select) : null;
+            const nextKey = next && panel.contains(next) ? String(next.dataset?.focusKey || "") : null;
             commitTemplate();
-            if (offset === null || next.isConnected) return;
+            if (nextKey === null || next.isConnected) return;
             setTimeout(() => {
                 if (!mounted || (document.activeElement && document.activeElement !== document.body)) return;
-                const after = focusables();
-                const anchor = after.findIndex((node) => node.dataset?.sonderReferenceTemplate === "1");
-                if (anchor >= 0) after[anchor + offset]?.focus();
+                (focusTargetFor(nextKey) || focusTargetFor("template"))?.focus?.({ preventScroll: true });
             }, 0);
         });
         state.flushTemplateDraft = () => {
@@ -995,10 +1011,10 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
         };
         templateRow.appendChild(select);
 
-        const mediaBtn = button(
+        const mediaBtn = keyed(button(
             `Media: ${recipe.media_kind === "audio" ? "Audio" : (recipe.media_kind === "video" ? "Video" : "Image")}`,
             occupied ? "Clear the lane before changing media kind" : "Switch this detached lane between Image and Audio model inputs",
-        );
+        ), "media");
         mediaBtn.disabled = occupied || laneLocked();
         if (mediaBtn.disabled) mediaBtn.style.opacity = "0.5";
         mediaBtn.addEventListener("click", () => {
@@ -1009,7 +1025,8 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
         templateRow.appendChild(mediaBtn);
 
         if (builtIn) {
-            const fork = button("Edit as custom", "Copy these values into a project recipe you can edit", "primary");
+            const fork = keyed(button("Edit as custom", "Copy these values into a project recipe you can edit", "primary"),
+                "edit-custom");
             fork.disabled = laneLocked();
             fork.addEventListener("click", () => void forkToCustom());
             templateRow.appendChild(fork);
@@ -1029,10 +1046,10 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
                 border:1px solid ${COLORS.border}; border-radius:7px;
                 background:${COLORS.panelMuted};
             `);
-            const summary = el("summary", group, `
+            const summary = keyed(el("summary", group, `
                 padding:8px 10px;font-size:11px;font-weight:700;color:${COLORS.text};
                 cursor:pointer;user-select:none;
-            `);
+            `), `group:${group}`);
             const invalidFields = fields.filter((field) => fieldIsUnsupported(recipe, field));
             block.open = invalidFields.length > 0 || disclosureOpen("recipe", group);
             block.addEventListener("toggle", () => rememberDisclosure("recipe", group, block.open));
@@ -1063,21 +1080,20 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
             }
             block.appendChild(groupBody);
             body.appendChild(block);
-            if (invalidFields.length && autofocusDue.recipe) queueMicrotask(() => {
-                block.querySelector("button,select,input")?.focus?.();
-            });
         }
 
         const actions = el("div", "", "display:flex;gap:6px;flex-wrap:wrap;margin-top:2px;");
-        const saveAs = button("Save as custom…", "Create a project recipe from this lane's current values");
+        const saveAs = keyed(button("Save as custom…", "Create a project recipe from this lane's current values"),
+            "save-as-custom");
         saveAs.addEventListener("click", () => void saveAsCustom());
         actions.appendChild(saveAs);
         if (definition && !definition.builtIn) {
-            const update = button(`Update “${definition.name}”`, "Push this lane's values back into the project recipe");
+            const update = keyed(button(`Update “${definition.name}”`, "Push this lane's values back into the project recipe"),
+                "update-custom");
             update.addEventListener("click", () => void updateCustom());
-            const rename = button("Rename", "Rename this project recipe");
+            const rename = keyed(button("Rename", "Rename this project recipe"), "rename-custom");
             rename.addEventListener("click", () => void renameCustom(definition));
-            const remove = button("Delete", "Delete this project recipe", "danger");
+            const remove = keyed(button("Delete", "Delete this project recipe", "danger"), "delete-custom");
             remove.addEventListener("click", () => void deleteCustom(definition));
             actions.append(update, rename, remove);
         }
@@ -1096,7 +1112,8 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
         details.open = disclosureOpen("advisories", "", false);
         details.addEventListener("toggle", () => rememberDisclosure(
             "advisories", "", details.open));
-        details.appendChild(el("summary", `Advisories (${laneAdvisories.length})`, `font-size:11px;color:${COLORS.textMuted};padding:7px 0;cursor:pointer;`));
+        details.appendChild(keyed(el("summary", `Advisories (${laneAdvisories.length})`,
+            `font-size:11px;color:${COLORS.textMuted};padding:7px 0;cursor:pointer;`), "advisories"));
         for (const advisory of laneAdvisories) {
             const silent = advisory.voice === "silent-loss";
             details.appendChild(el("div", `${silent ? "Silent loss" : "Suggestion"}: ${advisory.text}`, `
@@ -1230,9 +1247,11 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
         const asset = host._findAssetById?.(resolved.member.asset_id) || null;
         const tags = (resolved.member.tags || []).map((tag) => tagLabel(tag)).join(", ");
         return {
-            title: resolved.member.name
-                ? `${resolved.reference.name || "Reference"} · ${resolved.member.name}`
-                : (resolved.reference.name || "Reference"),
+            // The member label Attach and the lane bar show, unique in the Library.
+            title: host._referenceMemberDisplayNames?.().get(String(memberRef.member_id || ""))?.text
+                || (resolved.member.name
+                    ? `${resolved.reference.name || "Reference"} · ${resolved.member.name}`
+                    : (resolved.reference.name || "Reference")),
             detail: [resolved.member.prompt || asset?.name || "", tags].filter(Boolean).join(" · "),
             asset,
         };
@@ -1253,11 +1272,12 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
         `);
         row.appendChild(el("div", String(index + 1), `font-size:10px;color:${COLORS.textMuted};width:14px;text-align:right;`));
         const thumbUrl = asset ? host._referenceAssetPreviewUrl?.(asset) : null;
-        const thumb = el("button", "", `
+        const memberKey = `member:${item.reference_item_id}:${memberRef.member_id}`;
+        const thumb = keyed(el("button", "", `
             width:80px; height:60px; border-radius:6px; flex:0 0 80px; padding:0; cursor:pointer;
             background:${COLORS.bg} ${thumbUrl ? `url(${JSON.stringify(thumbUrl)}) center/cover no-repeat` : ""};
             border:1px solid ${COLORS.border};
-        `);
+        `), `${memberKey}:inspect`);
         thumb.type = "button";
         thumb.title = `Inspect ${title}`;
         thumb.setAttribute("aria-label", thumb.title);
@@ -1313,7 +1333,8 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
             row.style.flexWrap = "wrap";
             const controls = el("div", "", "display:flex;gap:4px;align-items:center;flex-wrap:wrap;width:100%;padding-left:56px;");
             if (roleFields.has("role")) {
-                const role = el("select", "", chromeInputCss({ padding: "2px 4px", fontSize: "10px" }));
+                const role = keyed(el("select", "", chromeInputCss({ padding: "2px 4px", fontSize: "10px" })),
+                    `role:${id}:${memberId}`);
                 const roleValues = [["", "Role: choose…"], ...roleCatalog.map(
                     (entry) => [entry.value, entry.label || entry.value])];
                 if (memberRef.role && !roleValues.some(([value]) => value === canonicalRole)) {
@@ -1334,7 +1355,8 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
                 controls.appendChild(role);
             }
             if (roleFields.has("visual_intent")) {
-                const retention = el("select", "", chromeInputCss({ padding: "2px 4px", fontSize: "10px" }));
+                const retention = keyed(el("select", "", chromeInputCss({ padding: "2px 4px", fontSize: "10px" })),
+                    `${memberKey}:visual`);
                 const choices = intentChoices("visual_intent", "Entity default");
                 if (memberRef.visual_intent && !choices.some((row) =>
                     row.value === String(memberRef.visual_intent))) {
@@ -1352,7 +1374,8 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
                 controls.appendChild(retention);
             }
             if (roleFields.has("audio_intent")) {
-                const audioIntent = el("select", "", chromeInputCss({ padding: "2px 4px", fontSize: "10px" }));
+                const audioIntent = keyed(el("select", "", chromeInputCss({ padding: "2px 4px", fontSize: "10px" })),
+                    `${memberKey}:audio`);
                 const choices = intentChoices("audio_intent", "Audio: entity default");
                 if (memberRef.audio_intent && !choices.some((row) =>
                     row.value === String(memberRef.audio_intent))) {
@@ -1378,13 +1401,13 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
         // does nothing.
         const reorder = (direction) => void editMembers(
             id, { kind: "move", memberId, direction }, "reorder reference members");
-        const up = button("↑", "Move earlier");
+        const up = keyed(button("↑", "Move earlier"), `${memberKey}:up`);
         up.disabled = locked || index === 0;
         up.addEventListener("click", () => reorder(-1));
-        const down = button("↓", "Move later");
+        const down = keyed(button("↓", "Move later"), `${memberKey}:down`);
         down.disabled = locked || index === total - 1;
         down.addEventListener("click", () => reorder(1));
-        const remove = button("×", "Remove this member from the item", "danger");
+        const remove = keyed(button("×", "Remove this member from the item", "danger"), `${memberKey}:remove`);
         remove.disabled = locked || total <= 1;
         remove.addEventListener("click", () => void editMembers(
             id, { kind: "remove", memberId }, "remove reference member"));
@@ -1406,7 +1429,8 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
         if (creating) {
             wrap.appendChild(el("div", "Pick the first member for the new item.", `font-size:11px;color:${COLORS.textMuted};`));
         }
-        const search = el("input", "", chromeInputCss({ padding: "4px 7px", fontSize: "11px" }));
+        const search = keyed(el("input", "", chromeInputCss({ padding: "4px 7px", fontSize: "11px" })),
+            "picker:search");
         search.placeholder = "Search the Library…";
         search.value = state.pickerQuery;
         search.addEventListener("input", () => {
@@ -1425,7 +1449,21 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
             // The effective view: a member a Library delete in flight is
             // taking away is not in it, and one still saving is, since the
             // stage is queued behind its create.
-            for (const reference of host._referencesView?.() ?? (host._references || [])) {
+            const libraryView = host._referencesView?.() ?? (host._references || []);
+            // The shared member label, except that a member with no name of
+            // its own is named by its asset here, so blank-named members of one
+            // Reference can still be told apart before staging.
+            const fallbackNames = new Map();
+            for (const reference of libraryView) {
+                for (const member of reference.members || []) {
+                    const assetName = host._findAssetById?.(member.asset_id)?.name;
+                    if (!String(member.name || "").trim() && assetName) fallbackNames.set(member.member_id, assetName);
+                }
+            }
+            const pickerNames = referenceMemberDisplayNames(libraryView.map((reference) => ({
+                ...reference, members: (reference.members || []).filter((member) => !member.pendingInert),
+            })), { fallbackNames });
+            for (const reference of libraryView) {
                 for (const member of reference.members || []) {
                     if (staged.has(member.member_id)) continue;
                     // A temporary id (a create sent to a server that does not
@@ -1445,7 +1483,9 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
                     if (query && !haystack.includes(query)) continue;
                     offered += 1;
                     const memberName = member.name || asset.name || member.member_id;
-                    const row = button(`${reference.name} · ${memberName}`, "Stage this member");
+                    const row = keyed(button(pickerNames.get(member.member_id)?.text
+                        || `${reference.name} · ${memberName}`, "Stage this member"),
+                        `picker:${reference.reference_id}:${member.member_id}`);
                     row.style.textAlign = "left";
                     row.addEventListener("click", () => {
                         state.pickerItemId = "";
@@ -1573,7 +1613,8 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
     // The read-only preview. Words are edited in the Prompt tool's Reference
     // Prompting; recipe syntax stays in this panel's recipe form.
     const renderPromptPreview = (item, { activeProfile = null, verdict = "" } = {}) => {
-        const preview = el("div", "", `display:flex;flex-direction:column;gap:3px;padding:5px 7px;border:1px solid ${COLORS.border};border-radius:5px;cursor:pointer;`);
+        const preview = keyed(el("div", "", `display:flex;flex-direction:column;gap:3px;padding:5px 7px;border:1px solid ${COLORS.border};border-radius:5px;cursor:pointer;`),
+            `preview:${item.reference_item_id}`);
         preview.dataset.sonderReferencePromptPreview = item.reference_item_id;
         preview.title = "Edit this text in the Prompt tool's Reference Prompting";
         // A control, so the keyboard reaches it as well as the pointer.
@@ -1674,7 +1715,7 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
         const header = el("div", "", `display:flex;align-items:center;gap:6px;font-size:10px;color:${COLORS.textMuted};`);
         header.appendChild(el("span", declared ? "Prompt — what this item contributes"
             : overridden ? "Prompt — overridden" : "Prompt — derived from members", "flex:1;min-width:0;"));
-        const copy = button("Copy", "Copy this prompt text");
+        const copy = keyed(button("Copy", "Copy this prompt text"), `item:${item.reference_item_id}:copy`);
         copy.addEventListener("click", async () => {
             const text = declared
                 ? manifestRowsForItem(item, activeProfile).map((row) =>
@@ -1712,9 +1753,10 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
             : [];
         const allowedRoles = new Set(itemRoleCatalog.map((entry) => String(entry.value)));
         const canonicalRole = (value) => String(value || "");
+        const roleSelectShown = Array.isArray(soft.role_fields) && soft.role_fields.includes("role");
         const header = el("div", "", "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:6px;");
         header.appendChild(sectionTitle(`Staged items (${items.length})`));
-        const add = button("+ Add item", "Stage a new item at the playhead");
+        const add = keyed(button("+ Add item", "Stage a new item at the playhead"), "add-item");
         add.disabled = locked;
         add.addEventListener("click", () => {
             state.pickerItemId = NEW_ITEM;
@@ -1748,7 +1790,9 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
                 border:1px solid ${effective ? COLORS.accent : COLORS.border}; border-radius:7px; padding:8px 10px;
                 display:flex; flex-direction:column; gap:6px;
             `);
-            const invalidMember = (item.members || []).find((member) => {
+            // Only a role this lane draws a Role select for can be shown, and
+            // so opened up, as invalid.
+            const invalidMember = roleSelectShown && (item.members || []).find((member) => {
                 const roleInvalid = catalogReady && !!member.role
                     && (!allowedRoles.size || !allowedRoles.has(canonicalRole(member.role)));
                 return roleInvalid;
@@ -1765,7 +1809,8 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
                 marker.title = VERDICT_EXPLANATION[verdict] || "";
                 top.appendChild(marker);
             }
-            const startInput = el("input", "", chromeInputCss({ padding: "3px 6px", fontSize: "11px" }) + "width:74px;");
+            const startInput = keyed(el("input", "", chromeInputCss({ padding: "3px 6px", fontSize: "11px" }) + "width:74px;"),
+                `item:${id}:start`);
             startInput.type = "number";
             startInput.min = "0";
             startInput.value = String(item.start_frame || 0);
@@ -1777,7 +1822,8 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
                 void writeField(id, { start_frame: Math.max(0, parsed) }, "move reference item")
                     .then((outcome) => resync(startInput, outcome, (row) => String(row.start_frame || 0)));
             });
-            const endInput = el("input", "", chromeInputCss({ padding: "3px 6px", fontSize: "11px" }) + "width:74px;");
+            const endInput = keyed(el("input", "", chromeInputCss({ padding: "3px 6px", fontSize: "11px" }) + "width:74px;"),
+                `item:${id}:end`);
             endInput.type = "number";
             endInput.min = "-1";
             endInput.value = String(item.end_frame ?? -1);
@@ -1796,7 +1842,8 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
                 el("span", "→", `font-size:11px;color:${COLORS.textMuted};`),
                 endInput,
             );
-            const strengthInput = el("input", "", chromeInputCss({ padding: "3px 6px", fontSize: "11px" }) + "width:64px;");
+            const strengthInput = keyed(el("input", "", chromeInputCss({ padding: "3px 6px", fontSize: "11px" }) + "width:64px;"),
+                `item:${id}:strength`);
             strengthInput.type = "number";
             strengthInput.min = "0";
             strengthInput.max = "1";
@@ -1819,7 +1866,8 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
                 ? hard.allowed_frame_counts.filter((value) => Number.isFinite(Number(value)) && Number(value) > 0)
                 : [];
             if (hard.assembly === "temporal" && allowedLengths.length) {
-                const sequenceSelect = el("select", "", chromeInputCss({ padding: "3px 6px", fontSize: "11px" }) + "width:92px;");
+                const sequenceSelect = keyed(el("select", "", chromeInputCss({ padding: "3px 6px", fontSize: "11px" }) + "width:92px;"),
+                    `item:${id}:sequence`);
                 const auto = el("option", "Auto length");
                 auto.value = "0";
                 sequenceSelect.appendChild(auto);
@@ -1840,14 +1888,15 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
                 });
                 top.append(sequenceSelect);
             }
-            const mute = button(item.muted ? "Muted" : "Active", "Exclude this item from resolution without deleting it");
+            const mute = keyed(button(item.muted ? "Muted" : "Active", "Exclude this item from resolution without deleting it"),
+                `item:${id}:mute`);
             mute.disabled = locked;
             // Toggles what the row holds when the host acts -- after any earlier
             // write on this item has settled -- so a second click before the
             // card repaints undoes the first rather than repeating it.
             mute.addEventListener("click", () => void writeField(
                 id, (row) => ({ muted: !row.muted }), "toggle reference mute"));
-            const del = button("Delete item", "Remove this staged item", "danger");
+            const del = keyed(button("Delete item", "Remove this staged item", "danger"), `item:${id}:delete`);
             del.disabled = locked;
             // The host resolves the live row by id when it acts, builds the
             // guard from it, paints the removal and owns the rollback.
@@ -1864,7 +1913,8 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
                 const { title, asset } = memberLabel(memberRef);
                 const chip = el("span", "", `display:inline-flex;align-items:center;gap:7px;max-width:300px;padding:4px 8px 4px 4px;border:1px solid ${COLORS.border};border-radius:8px;`);
                 const previewUrl = asset ? host._referenceAssetPreviewUrl?.(asset) : null;
-                const thumb = el("button", "", `width:96px;height:64px;flex:0 0 96px;padding:0;cursor:pointer;border:1px solid ${COLORS.border};border-radius:6px;background:${COLORS.bg} ${previewUrl ? `url(${JSON.stringify(previewUrl)}) center/cover no-repeat` : ""};`);
+                const thumb = keyed(el("button", "", `width:96px;height:64px;flex:0 0 96px;padding:0;cursor:pointer;border:1px solid ${COLORS.border};border-radius:6px;background:${COLORS.bg} ${previewUrl ? `url(${JSON.stringify(previewUrl)}) center/cover no-repeat` : ""};`),
+                    `item:${id}:thumb:${memberRef.member_id}`);
                 thumb.type = "button";
                 thumb.title = `Inspect ${title}`;
                 thumb.setAttribute("aria-label", thumb.title);
@@ -1885,9 +1935,10 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
             advanced.addEventListener("toggle", () => {
                 rememberDisclosure("item", item.reference_item_id, advanced.open);
             });
-            advanced.appendChild(el("summary",
+            advanced.appendChild(keyed(el("summary",
                 `${(item.members || []).length} member${(item.members || []).length === 1 ? "" : "s"} · prompt and per-member options`,
-                `font-size:10px;color:${COLORS.textMuted};cursor:pointer;user-select:none;padding:3px 0;`));
+                `font-size:10px;color:${COLORS.textMuted};cursor:pointer;user-select:none;padding:3px 0;`),
+            `item:${id}:options`));
             const advancedBody = el("div", "", "display:flex;flex-direction:column;gap:6px;padding-top:5px;");
             advancedBody.appendChild(renderPromptRow(item, {
                 activeProfile, verdict: verdicts.get(item.reference_item_id) || "" }));
@@ -1902,7 +1953,8 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
                     ["image", "video", "audio"].includes(recipe.media_kind)
                         ? recipe.media_kind : "image"));
             } else {
-                const addMember = button("+ Add member", "Stage another Library member on this item");
+                const addMember = keyed(button("+ Add member", "Stage another Library member on this item"),
+                    `item:${id}:add-member`);
                 addMember.disabled = locked;
                 addMember.addEventListener("click", () => {
                     state.pickerItemId = item.reference_item_id;
@@ -1914,9 +1966,6 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
             advanced.appendChild(advancedBody);
             card.appendChild(advanced);
             body.appendChild(card);
-            if (invalidMember && autofocusDue.items) queueMicrotask(() => {
-                advanced.querySelector("[data-sonder-invalid='1']")?.focus?.();
-            });
         }
     };
 
@@ -1951,7 +2000,8 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
     titleWrap.appendChild(el("div", "Reference Lane Setup", "font-size:15px;font-weight:700;color:#fff;"));
     const subtitle = el("div", "", `font-size:11px;color:${COLORS.textMuted};margin-top:3px;`);
     titleWrap.appendChild(subtitle);
-    const closeBtn = el("button", "Close", chromeButtonCss({ variant: "subtle", padding: "6px 12px", fontSize: "11px", radius: "7px" }));
+    const closeBtn = keyed(el("button", "Close", chromeButtonCss({ variant: "subtle", padding: "6px 12px", fontSize: "11px", radius: "7px" })),
+        "close");
     closeBtn.addEventListener("click", close);
     header.append(titleWrap, closeBtn);
     panel.appendChild(header);
@@ -1968,9 +2018,53 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
     `);
     panel.appendChild(body);
 
+    /** The rebuilt control named `key`, if this render drew one that can take
+     *  focus (a lock disables most controls). */
+    const focusTargetFor = (key) => (key
+        ? [...panel.querySelectorAll("[data-focus-key]")].find((node) =>
+            node.dataset.focusKey === key && !node.disabled)
+        : null) || null;
+    /** The key of the panel control holding focus, when a rebuild should give
+     *  it back. Not a control that holds typed or chosen input (a recipe
+     *  select, a number field): the host's gated refresh defers while one of
+     *  those has focus (`_managementPanelBusy`), so giving it back would hold
+     *  every later reconcile or rollback repaint behind it, leaving a refused
+     *  value on screen. The Template select is the exception: its own commits
+     *  repaint the panel directly, never through that gate. */
+    const restorableFocusKey = () => {
+        const active = document.activeElement;
+        if (!active || active === document.body || !panel.contains(active)) return "";
+        const key = String(active.dataset?.focusKey || "");
+        if (!key) return "";
+        if (active.dataset.sonderReferenceTemplate === "1") return key;
+        return host._managementPanelBusy?.(active) ? "" : key;
+    };
+    /** The first invalid control that can take focus, in document order:
+     *  staged items' roles are drawn above the recipe form. An invalid
+     *  checkbox list is reached through its Remove button. */
+    const firstInvalidControl = () => {
+        for (const node of body.querySelectorAll("[data-sonder-invalid='1']")) {
+            const target = ["SELECT", "INPUT", "BUTTON", "TEXTAREA"].includes(node.tagName)
+                ? node : node.querySelector("button");
+            if (target && !target.disabled) return target;
+        }
+        return null;
+    };
+    const runAutofocus = () => {
+        state.autofocusQueued = false;
+        const due = state.autofocusPending;
+        state.autofocusPending = null;
+        if (!due || !mounted) return;
+        // Never taken from the author: focus already inside the panel body
+        // stays where it is.
+        const active = document.activeElement;
+        if (active && active !== body && body.contains(active)) return;
+        firstInvalidControl()?.focus?.();
+    };
+
     const render = () => {
         if (!mounted) return;
-        const restoreTemplateFocus = document.activeElement?.dataset?.sonderReferenceTemplate === "1";
+        const focusKey = restorableFocusKey();
         if (!resyncDrawnLane()) return;
         // Set while the body is rebuilt, so the template select's blur during
         // that teardown never commits. Always cleared, even by an early return
@@ -1982,7 +2076,14 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
             state.rendering = false;
         }
         lastPreviewSignature = previewSignature();
-        if (restoreTemplateFocus) body.querySelector("[data-sonder-reference-template='1']")?.focus();
+        // Back to the same control, rebuilt. When this render drew none (a
+        // picker replaced "+ Add member", an item was removed, another lane is
+        // shown) focus is left alone rather than moved somewhere unasked.
+        if (focusKey) focusTargetFor(focusKey)?.focus?.({ preventScroll: true });
+        if (state.autofocusPending && !state.autofocusQueued) {
+            state.autofocusQueued = true;
+            queueMicrotask(runAutofocus);
+        }
     };
 
     const paint = () => {
@@ -2002,7 +2103,8 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
         for (const entry of entries) {
             const index = entry.laneIndex || 0;
             const active = index === state.laneIndex;
-            const tab = button(entry.customName || `Reference ${index + 1}`, "", active ? "primary" : "subtle");
+            const tab = keyed(button(entry.customName || `Reference ${index + 1}`, "", active ? "primary" : "subtle"),
+                `tab:${index}`);
             tab.addEventListener("click", () => {
                 if (index === state.laneIndex) return;
                 drawLane(index);
@@ -2049,12 +2151,14 @@ export function mountReferenceLanePanel(host, { laneIndex = 0 } = {}) {
         const drawn = { key: laneMemoryKey(), index: state.laneIndex };
         const sameLane = (prior) => !!prior && (prior.key === drawn.key
             || (prior.key.startsWith("index:") && prior.index === drawn.index));
-        autofocusDue = {
-            recipe: !sameLane(state.autofocused.recipe),
-            items: !sameLane(state.autofocused.items),
-        };
-        state.autofocused.recipe = drawn;
-        if (catalogAuthority.ready) state.autofocused.items = drawn;
+        const catalogSettled = catalogAuthority.ready || !!catalogAuthority.error;
+        if (catalogSettled && !sameLane(state.autofocused)) {
+            state.autofocused = drawn;
+            state.autofocusPending = drawn;
+        } else if (state.autofocusPending && !sameLane(state.autofocusPending)) {
+            // Due for a lane this render no longer shows.
+            state.autofocusPending = null;
+        }
         // Staged items first: this panel is opened to see what is on the lane.
         // The recipe is set once and read rarely.
         renderItems(body);

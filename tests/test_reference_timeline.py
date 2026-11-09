@@ -1154,8 +1154,10 @@ def test_bridge_references_gates_the_prompt_block_apart_from_the_r_block(monkeyp
     assembled = _bridge_reference_rows(monkeypatch, "sonder:wan_vace")
     assert assembled["image_slot_count"] == 1
     assert assembled["prompt_slot_count"] == 2
+    # Two unnamed members of one Reference: the shared member label numbers
+    # them apart (UX pass 3a); the Reference class is no longer appended.
     assert assembled["image_slot_labels"] == [
-        "Assembled · Subject (subject) + Subject (subject)"]
+        "Assembled · Subject (1) + Subject (2)"]
 
     audio = _bridge_reference_rows(monkeypatch, "sonder:ltx_id_lora_audio", member_count=3)
     assert audio["media_kind"] == "audio"
@@ -1232,11 +1234,11 @@ def test_bridge_references_reserves_the_widest_item_and_labels_assembled_payload
 
     assert lane_0["member_count"] == 1
     assert lane_0["reserved_member_span"] == 2
-    assert lane_0["slot_labels"] == ["Lane 0 member 0 (subject)", "(unused)"]
+    assert lane_0["slot_labels"] == ["Lane 0 member 0", "(unused)"]
     assert lane_0["image_slot_count"] == 1
-    assert lane_0["image_slot_labels"] == ["Assembled · Lane 0 member 0 (subject)"]
+    assert lane_0["image_slot_labels"] == ["Assembled · Lane 0 member 0"]
     assert lane_1["image_slot_labels"] == [
-        "Assembled · Lane 1 member 0 (subject) + Lane 1 member 1 (subject)"]
+        "Assembled · Lane 1 member 0 + Lane 1 member 1"]
 
 def test_bridge_references_uses_effective_window_and_h3_video_image_labels(monkeypatch):
     import importlib
@@ -1313,10 +1315,10 @@ def test_bridge_references_uses_effective_window_and_h3_video_image_labels(monke
     assert (early["window_start"], early["window_end"]) == (5, 20)
     assert early_lane["media_kind"] == "image"
     assert early_lane["image_slot_count"] == 1
-    assert early_lane["slot_labels"] == ["Video 1 · Early (subject)"]
+    assert early_lane["slot_labels"] == ["Video 1 · Early"]
 
     late = payload(65, 80)["references"][0]
-    assert late["slot_labels"] == ["Video 1 · Late (subject)"]
+    assert late["slot_labels"] == ["Video 1 · Late"]
 
     absent = payload(40, 50)["references"][0]
     assert absent["member_count"] == 0
@@ -1348,7 +1350,7 @@ def test_bridge_references_uses_effective_window_and_h3_video_image_labels(monke
     assert frozen["source"] == "snapshot"
     assert (frozen["window_start"], frozen["window_end"]) == (0, 20)
     assert frozen["references"][0]["slot_labels"] == [
-        "Video 1 · Early (subject)"]
+        "Video 1 · Early"]
     assert frozen["tag_presets"] == []
     assert frozen["tag_families"] == {}
 

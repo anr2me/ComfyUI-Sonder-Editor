@@ -1459,12 +1459,15 @@ MIRRORED_MODULES = {
             "test_lane_recipe_patch.py::test_the_editor_paints_exactly_what_the_server_stores"),
     },
     "reference_resolution.js": {
-        "scope": "Winner/threshold/prose verdicts, output liveness and derived member prompt text.",
+        "scope": ("Winner/threshold/prose verdicts, output liveness, derived member prompt "
+                  "text and the unique member display label."),
         "authorities": ("server/reference_resolution.py::resolve_reference_verdicts",
                         "server/reference_resolution.py::reference_live_outputs",
                         "nodes/reference_core.py::_assemble_prompt",
-                        "nodes/reference_core.py::member_prompt_fragment"),
+                        "nodes/reference_core.py::member_prompt_fragment",
+                        "server/reference_prompt_formatter.py::reference_member_display_names"),
         "tests": (
+            "test_reference_member_labels.py::test_member_display_names_match_between_python_and_javascript",
             "test_reference_timeline.py::test_python_and_browser_reference_resolvers_share_most_specific_semantics",
             "test_reference_timeline.py::test_recipe_output_liveness_mirrors_across_backend_and_frontend",
             "test_reference_panel_js.py::test_derived_prompt_matches_between_python_and_javascript",
@@ -1605,7 +1608,8 @@ def test_declared_mirror_headers_match_the_inventory_both_ways():
 def test_every_declared_mirror_has_a_live_parity_disposition():
     _assert_mirror_obligations(MIRRORED_MODULES, ROOT)
     # 72: `timeline_gesture_geometry.js` joined with one authority (UX pass phase 1).
-    assert sum(len(row["authorities"]) for row in MIRRORED_MODULES.values()) == 72
+    # 73: `reference_resolution.js` gained the member display label (UX pass phase 3a).
+    assert sum(len(row["authorities"]) for row in MIRRORED_MODULES.values()) == 73
 
 @pytest.mark.parametrize("name, valid", [("TABLE", True), ("row", False), ("transform", True)])
 def test_mirror_authorities_are_module_declarations(tmp_path, name, valid):

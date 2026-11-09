@@ -2,6 +2,7 @@
 // @server-mirror server/reference_resolution.py::reference_live_outputs
 // @server-mirror nodes/reference_core.py::_assemble_prompt
 // @server-mirror nodes/reference_core.py::member_prompt_fragment
+// @server-mirror server/reference_prompt_formatter.py::reference_member_display_names
 // Scope and parity disposition: tests/test_mutation_authoring_contract.py::MIRRORED_MODULES
 // Type-homogeneous Bridge output groups. Mirrored in
 // server/reference_resolution.py.
@@ -59,6 +60,97 @@ export function referenceMemberLabels(entityName, memberName = "") {
         name: [entityToken, memberToken].filter(Boolean).join("_"),
         display_name: [entityDisplay, memberDisplay].filter(Boolean).join(" · "),
     };
+}
+
+/**
+ * Every Library member's display label, unique across the Library. Mirrors
+ * `reference_member_display_names` in server/reference_prompt_formatter.py.
+ *
+ * The base is `referenceMemberLabels`' "Reference · Member" (the Reference
+ * alone when the member has no name). Labels that would still collide are
+ * told apart in Library order, the one order both sides read:
+ *
+ * - a Reference sharing its name with an earlier one gets " (2)", " (3)"…;
+ * - within one Reference, members whose names collide get " @handle" when
+ *   they have one, and the rest " (1)", " (2)"… among themselves (only when
+ *   more than one is left without a handle).
+ *
+ * Returns `member_id -> { reference, member, suffix, text }`, so a surface
+ * that groups members under their Reference builds from parts rather than
+ * splitting `text` (a name may itself contain " · "). `fallbackNames` maps a
+ * member id to a name used when the member has none (the staging picker's
+ * asset name).
+ */
+export function referenceMemberDisplayNames(references = [], { fallbackNames = null } = {}) {
+    const out = new Map();
+    const fallback = (memberId) => String((fallbackNames instanceof Map
+        ? fallbackNames.get(memberId) : fallbackNames?.[memberId]) || "").trim();
+    const referenceSeen = new Map();
+    for (const reference of Array.isArray(references) ? references : []) {
+        const baseName = referenceMemberLabels(reference?.name || "Reference").display_name || "Reference";
+        const seen = (referenceSeen.get(baseName) || 0) + 1;
+        referenceSeen.set(baseName, seen);
+        const referencePart = seen > 1 ? `${baseName} (${seen})` : baseName;
+        const rows = [];
+        for (const member of Array.isArray(reference?.members) ? reference.members : []) {
+            const memberId = String(member?.member_id || "");
+            if (!memberId || out.has(memberId) || rows.some((row) => row.memberId === memberId)) continue;
+            const memberPart = String(member?.name || "").trim() || fallback(memberId);
+            rows.push({ memberId, memberPart, handle: String(member?.handle || "").trim() });
+        }
+        const groups = new Map();
+        for (const row of rows) {
+            if (!groups.has(row.memberPart)) groups.set(row.memberPart, []);
+            groups.get(row.memberPart).push(row);
+        }
+        for (const group of groups.values()) {
+            const unhandled = group.filter((row) => !row.handle);
+            for (const row of group) {
+                let suffix = "";
+                if (group.length > 1) {
+                    if (row.handle) suffix = ` @${row.handle}`;
+                    else if (unhandled.length > 1) suffix = ` (${unhandled.indexOf(row) + 1})`;
+                }
+                out.set(row.memberId, {
+                    reference: referencePart,
+                    member: row.memberPart,
+                    suffix,
+                    text: row.memberPart
+                        ? `${referencePart} · ${row.memberPart}${suffix}`
+                        : `${referencePart}${suffix}`,
+                });
+            }
+        }
+    }
+    return out;
+}
+
+/**
+ * A staged item's members grouped under their Reference, from
+ * `referenceMemberDisplayNames` parts: "Cowboy · Character Sheet + Prop ·
+ * Weapon_Sheet, Sonder". A member with no name adds nothing beyond its
+ * Reference. A member the map does not hold (deleted, still saving) is
+ * shown by its Reference's name when `entityNames` (`reference_id -> name`)
+ * still has it, and left out otherwise. Empty when nothing resolves, so the
+ * caller picks its fallback.
+ */
+export function referenceItemLabel(memberRefs = [], displayNames = new Map(), entityNames = null) {
+    const groups = new Map();
+    for (const memberRef of Array.isArray(memberRefs) ? memberRefs : []) {
+        let parts = displayNames?.get?.(String(memberRef?.member_id || ""));
+        if (!parts) {
+            const entityName = String(entityNames?.get?.(String(memberRef?.entity_id || "")) || "").trim();
+            parts = entityName ? { reference: entityName, member: "", suffix: "" } : null;
+        }
+        if (!parts) continue;
+        if (!groups.has(parts.reference)) groups.set(parts.reference, []);
+        const member = parts.member ? `${parts.member}${parts.suffix}` : "";
+        if (member && !groups.get(parts.reference).includes(member)) {
+            groups.get(parts.reference).push(member);
+        }
+    }
+    return [...groups].map(([reference, members]) => (members.length
+        ? `${reference} · ${members.join(", ")}` : reference)).join(" + ");
 }
 
 export function memberPromptFragment(pattern, index, prompt, name, registryNumbers = null, memberName = "") {
@@ -185,6 +277,21 @@ export const REFERENCE_VERDICT_LABEL = Object.freeze({
     [REFERENCE_VERDICT.OUTSIDE]: "Outside window",
     [REFERENCE_VERDICT.EXCLUDED]: "Excluded",
 });
+
+/** Which staged copy's state a single listing shows: the one closest to
+ *  applying. Attach lists a member, and a Subject's sources, once even when
+ *  they are staged several times. */
+export const REFERENCE_VERDICT_RANK = Object.freeze([
+    REFERENCE_VERDICT.WINNER, REFERENCE_VERDICT.SUPERSEDED,
+    REFERENCE_VERDICT.BELOW_THRESHOLD, REFERENCE_VERDICT.OUTSIDE,
+    REFERENCE_VERDICT.EXCLUDED,
+]);
+
+/** A verdict's place in `REFERENCE_VERDICT_RANK`; unknown verdicts last. */
+export function referenceVerdictRank(verdict) {
+    const rank = REFERENCE_VERDICT_RANK.indexOf(verdict);
+    return rank < 0 ? REFERENCE_VERDICT_RANK.length : rank;
+}
 
 /**
  * Score every staged item for a window and say what happened to each one.

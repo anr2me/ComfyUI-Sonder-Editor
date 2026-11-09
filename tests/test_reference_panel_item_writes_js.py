@@ -174,7 +174,7 @@ class N {
   get selectedOptions() { return this.options.filter((o) => o.value === this.value); }
   get textContent() { return this._text; }
   set textContent(v) { this._text = String(v ?? ""); for (const c of this.children) c.parentElement = null;
-    this.children = []; this.options = []; }
+    this.children = []; this.options = []; dropDetachedFocus(); }
   get isConnected() { let n = this; while (n.parentElement) n = n.parentElement; return n === document.body; }
   appendChild(c) { if(!c?.tagName) return c; c.parentElement?.children && c.remove();
     this.children.push(c); c.parentElement=this; if(c.tagName==="OPTION") this.options.push(c); return c; }
@@ -187,22 +187,29 @@ class N {
     preventDefault() {}, stopPropagation() {}, ...extra })); }
   setAttribute(k,v) { this.attributes[k]=String(v); }
   getAttribute(k) { return this.attributes[k] ?? null; }
-  // Tag lists, and one `[data-x='v']` attribute selector (the panel's autofocus).
-  querySelectorAll(sel) { const attr=/^\[data-([\w-]+)='([^']*)'\]$/.exec(String(sel).trim());
+  // Tag lists, and one `[data-x='v']` or `[data-x]` attribute selector (the
+  // panel's autofocus and focus keys).
+  querySelectorAll(sel) { const attr=/^\[data-([\w-]+)(?:='([^']*)')?\]$/.exec(String(sel).trim());
     const key=attr && attr[1].replace(/-(\w)/g, (_m, c) => c.toUpperCase());
     const tags=String(sel).split(",").map((v)=>v.trim().toUpperCase());
-    const hit=(c)=>attr ? c.dataset[key] === attr[2] : tags.includes(c.tagName);
+    const hit=(c)=>attr ? (attr[2] === undefined ? c.dataset[key] !== undefined
+      : c.dataset[key] === attr[2]) : tags.includes(c.tagName);
     const out=[]; const walk=(n)=>n.children.forEach((c)=>{ if(hit(c)) out.push(c); walk(c); });
     walk(this); return out; }
   querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
   contains(node) { for (let n = node; n; n = n.parentElement) if (n === this) return true; return false; }
   getClientRects() { return this.isConnected ? [{}] : []; }
-  focus() { document.activeElement = this; fireDoc('focusin', this); }
+  // As a browser does: a disabled or detached control cannot take focus.
+  focus() { if (this.disabled || !this.isConnected) return;
+    document.activeElement = this; fireDoc('focusin', this); }
   blur() { if (document.activeElement === this) document.activeElement = document.body; fireDoc('focusout', this); }
   remove() { if(this.parentElement) { this.parentElement.children =
-    this.parentElement.children.filter((c)=>c!==this); this.parentElement = null; } }
+    this.parentElement.children.filter((c)=>c!==this); this.parentElement = null; } dropDetachedFocus(); }
 }
 const fireDoc = (type, target) => (docListeners[type] || []).forEach((h) => h({ target, button: 0 }));
+// A focused node taken out of the document leaves focus on the body.
+const dropDetachedFocus = () => { const active = document.activeElement;
+  if (active && active !== document.body && !active.isConnected) document.activeElement = document.body; };
 globalThis.document = { createElement:(t)=>new N(t), body:new N("body"), activeElement:null,
   addEventListener:(t,h)=>{ (docListeners[t] ||= []).push(h); },
   removeEventListener:(t,h)=>{ docListeners[t] = (docListeners[t] || []).filter((x) => x !== h); },
@@ -1678,6 +1685,9 @@ def test_a_member_edit_behind_an_unpainted_one_waits_and_both_persist(tmp_path):
     first select still focused -- waits, reads the adopted members as its guard,
     and both persist."""
     result = run_item_panel(_MEMBERS + """
+    // A ready Prompt Format catalog: without one the retention selects are
+    // disabled, and a disabled select cannot hold focus.
+    w._promptContextCatalog = { schema_version: 1 };
     mount();
     hold();
     const [first, second] = cardAt(10).querySelectorAll('select');

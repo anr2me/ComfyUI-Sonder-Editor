@@ -2,7 +2,13 @@
 // modes. Projects store semantic attachment ids; this module never writes
 // provider ordinals, timestamps, or generated text into authored documents.
 
-import { REFERENCE_VERDICT_LABEL, resolveReferenceVerdicts } from "./reference_resolution.js";
+import {
+    REFERENCE_VERDICT_LABEL,
+    referenceItemLabel,
+    referenceMemberDisplayNames,
+    referenceVerdictRank,
+    resolveReferenceVerdicts,
+} from "./reference_resolution.js";
 import { lanePopulation } from "./reference_lane_identity.js";
 import { EDITOR_COLORS as COLORS, chromeInputCss, setButtonDisabled,
     setButtonVariant } from "./editor_theme.js";
@@ -26,6 +32,18 @@ import {
 import { promptCandidateVisuallyStale } from "./prompt_context_diagnostics.js";
 import { captureTaskTypePreview,
     createTaskTypeChoiceControl } from "./prompt_task_type_choices.js";
+
+// `referenceMemberDisplayNames` per References array: the mention menu builds
+// its options on every keystroke, and the array is replaced, never mutated,
+// when the Library changes.
+const memberDisplayNamesCache = new WeakMap();
+function memberDisplayNamesFor(references) {
+    if (!Array.isArray(references)) return new Map();
+    if (!memberDisplayNamesCache.has(references)) {
+        memberDisplayNamesCache.set(references, referenceMemberDisplayNames(references));
+    }
+    return memberDisplayNamesCache.get(references);
+}
 
 /**
  * Context-chip role identity: the violet that marks an authored chip as a chip
@@ -950,11 +968,11 @@ export function subjectSourceEligibility({ sources = [], referenceItems = [],
     });
     if (!states.length) {
         return { eligible: false, appliesNow: false,
-            reason: "not staged in this scene", suffix: " - not staged in this scene" };
+            reason: "not staged in this scene", suffix: " — not staged in this scene" };
     }
     if (!states.some((state) => state.profileCompatible)) {
         return { eligible: false, appliesNow: false,
-            reason: "incompatible prompt format", suffix: " - incompatible prompt format" };
+            reason: "incompatible prompt format", suffix: " — incompatible prompt format" };
     }
     const compatibleStates = states.filter((state) => state.profileCompatible);
     const appliesNow = compatibleStates.some((state) => state.verdict === "winner");
@@ -962,12 +980,14 @@ export function subjectSourceEligibility({ sources = [], referenceItems = [],
     const eligible = globalScope ? compatibleStates.length > 0 : appliesNow;
     if (globalScope) {
         return { eligible, appliesNow, reason: "",
-            suffix: scope?.hasSelection && appliesNow ? " - applies now" : "" };
+            suffix: scope?.hasSelection && appliesNow ? " — applies now" : "" };
     }
     if (!appliesNow) {
-        const verdict = compatibleStates[0]?.verdict || states[0]?.verdict || "outside";
+        // The copy closest to applying, as Attach ranks a Picture source.
+        const verdict = compatibleStates.map((state) => state.verdict).sort((left, right) =>
+            referenceVerdictRank(left) - referenceVerdictRank(right))[0] || "outside";
         const reason = REFERENCE_VERDICT_LABEL[verdict] || verdict;
-        return { eligible: false, appliesNow, reason, suffix: ` - ${reason}` };
+        return { eligible: false, appliesNow, reason, suffix: ` — ${reason}` };
     }
     return { eligible: true, appliesNow, reason: "", suffix: "" };
 }
@@ -4622,14 +4642,15 @@ export function promptReferenceSourceOptions({ scene = null, references = [],
         laneConfigs: scene?.reference_lane_configs || [],
         frameThresholdPct: Number(scene?._context_reference_frame_threshold || 0),
     });
-    const referenceNames = new Map((references || []).map((value) => [
-        value.reference_id, value.name || value.reference_id,
-    ]));
+    // The one member label (`referenceMemberDisplayNames`), so "Prop · Sonder"
+    // and "Prop · Weapon_Sheet" read apart here as on the lane bar.
+    const displayNames = memberDisplayNamesFor(references);
+    // A staged member no longer in the Library still reads as its Reference.
+    const entityNames = new Map((references || []).map((value) => [
+        value.reference_id, value.name || value.reference_id]));
     const laneRecipes = Array.isArray(scene?.reference_lane_recipes)
         ? scene.reference_lane_recipes : [];
     const itemOptions = referenceItems.map((item, index) => {
-        const names = [...new Set((item.members || []).map((value) =>
-            referenceNames.get(value.entity_id)).filter(Boolean))];
         const verdict = verdictResult.verdicts.get(index) || "outside";
         const wrapper = laneRecipes[Number(item.lane_index || 0)] || {};
         const recipe = wrapper.recipe && typeof wrapper.recipe === "object"
@@ -4643,7 +4664,7 @@ export function promptReferenceSourceOptions({ scene = null, references = [],
             ? (hasSelection && verdict === "winner" ? " — applies now" : "")
             : ` — ${verdictLabel}`;
         return [`item:${item.reference_item_id}`,
-            `Lane ${Number(item.lane_index || 0) + 1}: ${names.join(" + ") || "Reference"}${stateLabel}${profileCompatible ? "" : " / incompatible prompt format"}`,
+            `Lane ${Number(item.lane_index || 0) + 1}: ${referenceItemLabel(item.members, displayNames, entityNames) || "Reference"}${stateLabel}${profileCompatible ? "" : " — incompatible prompt format"}`,
             eligibility];
     });
     const makeUnitOption = (value, sources) => {
@@ -4660,7 +4681,11 @@ export function promptReferenceSourceOptions({ scene = null, references = [],
     // can bind a Subject; stale unit:<reference_id> chips stay unavailable.
     const unitOptions = (semanticUnits || []).map((value) =>
         makeUnitOption(value, value.sources || []));
-    const physicalOptions = [];
+    // One option per chip value. A chip binds a member per source type, not
+    // per staged copy, so a member staged in several items of one population
+    // is one choice, shown with the state of its best copy and eligible when
+    // any copy is.
+    const copiesByValue = new Map();
     referenceItems.forEach((item, index) => {
         const verdict = verdictResult.verdicts.get(index) || "outside";
         const wrapper = laneRecipes[Number(item.lane_index || 0)] || {};
@@ -4677,23 +4702,36 @@ export function promptReferenceSourceOptions({ scene = null, references = [],
         const compatible = recipe?.soft?.compatible_profiles || ["generic@1"];
         const profileCompatible = compatible.includes(profileId);
         const eligible = profileCompatible && (globalScope || verdict === "winner");
-        let stateSuffix = "";
-        if (!profileCompatible) stateSuffix = " - incompatible prompt format";
-        else if (globalScope) {
-            // The existing compact label already adds the applies-now badge.
-            stateSuffix = "";
-        } else {
-            stateSuffix = ` - ${REFERENCE_VERDICT_LABEL[verdict] || verdict}`;
-        }
         for (const member of item.members || []) {
             const memberId = String(member?.member_id || "");
             if (!memberId) continue;
-            const name = referenceNames.get(member.entity_id) || memberId;
-            physicalOptions.push([`physical:${population}:${memberId}`,
-                `${population[0].toUpperCase()}${population.slice(1)} source: ${name}${globalScope && hasSelection && verdict === "winner" ? " — applies now" : ""}`, true]);
-            physicalOptions[physicalOptions.length - 1][1] += stateSuffix;
-            physicalOptions[physicalOptions.length - 1][2] = eligible;
+            const value = `physical:${population}:${memberId}`;
+            if (!copiesByValue.has(value)) {
+                copiesByValue.set(value, { population, memberId,
+                    entityId: String(member?.entity_id || ""), copies: [] });
+            }
+            copiesByValue.get(value).copies.push({ verdict, profileCompatible, eligible });
         }
+    });
+    const physicalOptions = [...copiesByValue].map(([value, { population, memberId, entityId, copies }]) => {
+        const best = copies.slice().sort((left, right) =>
+            Number(right.profileCompatible) - Number(left.profileCompatible)
+            || referenceVerdictRank(left.verdict) - referenceVerdictRank(right.verdict))[0];
+        let stateSuffix = "";
+        if (!best.profileCompatible) stateSuffix = " — incompatible prompt format";
+        else if (globalScope) {
+            stateSuffix = hasSelection && best.verdict === "winner" ? " — applies now" : "";
+        } else {
+            stateSuffix = ` — ${REFERENCE_VERDICT_LABEL[best.verdict] || best.verdict}`;
+        }
+        // Two winning copies of one population put the member in two slots,
+        // which the compiler refuses as ambiguous; say so before it is chosen.
+        const winningSlots = copies.filter((copy) => copy.profileCompatible
+            && copy.verdict === "winner").length;
+        if (winningSlots > 1) stateSuffix += ` — in ${winningSlots} slots`;
+        const name = displayNames.get(memberId)?.text || entityNames.get(entityId) || memberId;
+        return [value, `${population[0].toUpperCase()}${population.slice(1)}: ${name}${stateSuffix}`,
+            copies.some((copy) => copy.eligible)];
     });
     return {
         usesDeclaredSources,

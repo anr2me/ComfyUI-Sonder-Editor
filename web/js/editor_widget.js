@@ -390,7 +390,7 @@ import {
     laneRecipePatchPlan, laneStagingPopulation, memberPopulationCompatible,
     referenceConfigurationAdvisories, resolveReferenceDropVerdict,
 } from "./reference_lane_identity.js";
-import { REFERENCE_LANE_CAUSE, classifyReferenceChunks } from "./reference_resolution.js";
+import { REFERENCE_LANE_CAUSE, classifyReferenceChunks, referenceMemberDisplayNames } from "./reference_resolution.js";
 import { deriveCurrentSceneAssetIds } from "./current_scene_assets.js";
 import { notifyInfo, notifySuccess, notifyWarning, notifyError, notifyProgress } from "./editor_notifications.js";
 import { blockedState, changedAssetIds, displayVideoSource, needsProxy, proxyStore } from "./media_display_source.js";
@@ -2851,6 +2851,22 @@ export class EditorWidget {
     _referenceViewIndex() {
         this._referencesView();
         return this._referencesViewCache.members;
+    }
+
+    /** `member_id -> {reference, member, suffix, text}` for the view: the one
+     *  member label Attach, the Reference lane bar and Lane Setup show
+     *  (`referenceMemberDisplayNames`). Built once per view revision, since
+     *  the timeline reads it on every draw. */
+    _referenceMemberDisplayNames() {
+        this._referencesView();
+        const cache = this._referencesViewCache;
+        if (!cache.displayNames) {
+            cache.displayNames = referenceMemberDisplayNames(cache.view.map((reference) => ({
+                ...reference,
+                members: (reference?.members || []).filter((member) => !member?.pendingInert),
+            })));
+        }
+        return cache.displayNames;
     }
 
     /** Custom recipes as displayed: acknowledged `_customReferenceRecipes`

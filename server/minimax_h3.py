@@ -7,7 +7,7 @@ import math
 
 from .reference_resolution import resolve_effective_references
 from .reference_prompt_formatter import as_plain_record
-from .reference_prompt_formatter import reference_member_labels
+from .reference_prompt_formatter import reference_member_display_names, reference_member_labels
 
 
 SETUP_VERSION = "minimax_h3_setup_v1"
@@ -169,7 +169,8 @@ def staged_member_intent(member_ref, field) -> str:
     return value if isinstance(value, str) and value in vocabulary else ""
 
 
-def _member_slots(winner, lane_id, population, member_lookup, asset_lookup):
+def _member_slots(winner, lane_id, population, member_lookup, asset_lookup,
+                  display_names=None):
     if not winner:
         return []
     item = as_plain_record(winner.get("item"))
@@ -197,7 +198,10 @@ def _member_slots(winner, lane_id, population, member_lookup, asset_lookup):
             "entity_name": labels["entity_name"],
             "member_name": labels["member_name"],
             "prompt_name": labels["name"],
-            "display_name": labels["display_name"],
+            # The one member label (unique across the Library), which the
+            # identity panel and diagnostics show; the token names stay as-is.
+            "display_name": ((display_names or {}).get(member_id) or {}).get("text")
+            or labels["display_name"],
             "handle": str(member.get("handle") or ""),
             # Authored Library prose, not either display/prompt-safe name.
             # Prompt Context consumes this only after the effective attachment
@@ -289,6 +293,7 @@ def resolve_setup(*, setup, guide_frames=None, reference_items=None,
         window_end=window_end, lane_configs=lane_configs,
         frame_threshold_pct=frame_threshold_pct)
     _entities, member_lookup = _entity_lookup(references)
+    display_names = reference_member_display_names(references or [])
     assets_by_id = _asset_lookup(assets)
 
     def collect(declaration):
@@ -318,7 +323,7 @@ def resolve_setup(*, setup, guide_frames=None, reference_items=None,
                 continue
             winner = winners[lane_index] if lane_index < len(winners) else None
             lane_rows = _member_slots(winner, lane_id, population,
-                                      member_lookup, assets_by_id)
+                                      member_lookup, assets_by_id, display_names)
             for row in lane_rows:
                 row["exposed_capabilities"] = [str(entry) for entry in
                                                soft.get("exposed_capabilities", [])]

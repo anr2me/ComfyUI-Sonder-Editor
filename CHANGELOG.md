@@ -14,7 +14,18 @@ a fresh `[Unreleased]` block.
 ### Added
 - Right-click a staged Reference item and choose **Set Reference to Selection** to give it the current In–Out range, as one Undo step. A range that reaches the scene end keeps following it. The entry is greyed out until both In and Out are set, and on a locked lane; a range that would overlap another item on the lane is refused.
 
+### Changed
+- Reference names now say which member they mean, as Reference · Member (for example **Prop · Sonder**), wherever a Reference item is listed or labelled:
+  - Reference lane bars group members under their Reference (**Cowboy · Cowboy Character Sheet + Prop · Weapon_Sheet, Sonder**).
+  - The Attach source list shows each staged member once (**Picture: Prop · Sonder**). It adds **in 2 slots** when two items in the window carry the same member.
+  - Reference Bridge output labels name the member instead of the Reference's subject or context class (`r01 · Picture 1 · Prop · Sonder`). A saved workflow shows the new labels the next time its Bridge refreshes.
+
+  Members of one Reference that share a name are told apart by their @handle or a number.
+
 ### Fixed
+- Reference Lane Setup now focuses the first unsupported role when it opens, not the last. An unsupported recipe value no longer takes focus ahead of a role above it.
+- Keyboard focus is kept when you switch the Template in Reference Lane Setup. Leaving the select with Tab lands on the control you tabbed to, or back on the Template select if that control is gone. A panel refresh no longer drops focus from a button.
+- When a Subject chip and a Picture chip send the same member's text, the Picture chip now shows an advisory naming the member: untick **Definition** under **Prompt parts and routing** to send it once. The advisory used to miss this case, and its advice to blank a field brought the text back.
 - Clicking a timeline item too narrow to show its middle selects it, and Ctrl- or Shift-click adds it to the selection. A narrow item keeps a middle you can drag to move it; zoom in to trim one. Grabbing an edge and letting go without moving it no longer saves anything or adds an Undo step.
 - Dropping a clip on another clip of a different length no longer leaves them overlapping. On one lane the two trade places within the space they already cover; across lanes a swap that would land on another item is refused, and the drag stays where it last fit. A linked or locked clip is no longer swapped.
 - Dragging a guide that sits at the scene end now starts from where it is shown, instead of jumping to the start of the scene. A linked partner moves by the same distance.

@@ -128,7 +128,9 @@ overridden stay visible.
 
 Leave optional fields empty when you have nothing to add. A field following
 a source can still contribute that source's text; untick that part in the
-chip if you want none. If an advisory names a missing
+chip if you want none. When a Subject chip and a Picture chip send the same
+member's text, the Picture chip's advisory says so; untick its **Definition**
+under **Prompt parts and routing** to send the text once. If an advisory names a missing
 field, use its **Fix** to open the field and supply the requested detail.
 
 ![The top of Prompt Management: a warning that a Subject needs authored detail in "Preservation detail", with a Fix button beside it](images/prompt-management-fix.webp)

@@ -399,7 +399,8 @@ To choose the task types yourself instead, click **Customize** under
 
 A **Subject** names reusable content: a person, place, outfit or style. It
 can draw on several Library members. A **Picture** source names the image
-itself, such as a composition anchor. For a character taken from a picture,
+itself, such as a composition anchor. The source list shows each staged member
+once, by its Reference and member name (**Picture: Prop · Sonder**). For a character taken from a picture,
 attach a Subject and select that picture as its source.
 
 To create a Subject while attaching a chip:
@@ -524,7 +525,9 @@ Each Bridge exposes 16 numbered outputs:
 
 Slot order follows staged member order, and lanes concatenate in lane-index
 order. Non-slot assemblies emit one payload per lane; slot recipes emit one
-member per output.
+member per output. Each output's label names what it carries, such as
+`r01 · Picture 1 · Prop · Sonder`: the prompt label, then the Reference and
+member.
 
 An inactive earlier lane leaves its outputs reading `(unused)`; later lanes
 keep their socket positions. Each selected lane reserves enough outputs for

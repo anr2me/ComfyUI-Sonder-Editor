@@ -53,6 +53,7 @@ from .path_security import (
 )
 from .atomic_io import atomic_replace
 from .reference_resolution import reference_live_outputs, resolve_effective_references
+from .reference_prompt_formatter import reference_member_display_names
 from .prompt_live_context import (
     compile_live_scene_prompt_context,
     resolve_scene_prompt_context,
@@ -15490,11 +15491,19 @@ if routes is not None:
             for reference in catalog_references
             for member in reference.members
         }
-        references_by_member_id = {
-            member.member_id: reference
-            for reference in catalog_references
-            for member in reference.members
-        }
+        # The member label Attach and the lane bar show ("Prop · Sonder"),
+        # unique across the Library. Display only: sockets are matched by name.
+        # The setup's own `display_name` comes first: it was made from the
+        # whole Library, while a running job's frozen catalog holds only the
+        # References it uses, so a "Cowboy (2)" would lose its number there.
+        member_display_names = reference_member_display_names(catalog_references)
+        for row in (setup_manifest.get("presentation") or []) if isinstance(setup_manifest, dict) else []:
+            if not isinstance(row, dict):
+                continue
+            row_member_id = str(row.get("member_id") or row.get("video_member_id") or "")
+            row_display = str(row.get("display_name") or "").strip()
+            if row_member_id and row_display:
+                member_display_names[row_member_id] = {"text": row_display}
         physical_labels = {}
         for population, ordinal_key, label in (
                 ("pictures", "picture_ordinal", "Picture"),
@@ -15541,13 +15550,8 @@ if routes is not None:
                     slot_labels.append("(unused)")
                     continue
                 member_id = str((member_refs[slot_index] or {}).get("member_id", "") or "")
-                reference = references_by_member_id.get(member_id)
-                if reference is None:
-                    display = f"Reference {slot_index + 1}"
-                else:
-                    name = str(getattr(reference, "name", "") or "Reference")
-                    role = str(getattr(reference, "reference_class", "") or "subject")
-                    display = f"{name} ({role})"
+                display = (member_display_names.get(member_id) or {}).get("text") \
+                    or f"Reference {slot_index + 1}"
                 physical = physical_labels.get((lane_id, member_id), "")
                 slot_labels.append(f"{physical} · {display}" if physical else display)
             if assembly == "slots":

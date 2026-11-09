@@ -33,6 +33,60 @@ def reference_member_labels(entity_name: str, member_name: str = "") -> dict:
     }
 
 
+def reference_member_display_names(references, *, fallback_names=None) -> dict:
+    """Every Library member's display label, unique across the Library.
+
+    Mirrors ``referenceMemberDisplayNames`` in web/js/reference_resolution.js;
+    ``tests/test_reference_member_labels.py`` holds the two to the same output.
+    The base is ``reference_member_labels``' "Reference · Member". Collisions
+    are told apart in Library order: a Reference sharing an earlier one's name
+    gets " (2)", " (3)"…; within one Reference, members whose names collide
+    get " @handle" when they have one, and the rest " (1)", " (2)"… (only when
+    more than one is left without a handle).
+
+    Returns ``member_id -> {"reference", "member", "suffix", "text"}``.
+    ``fallback_names`` maps a member id to a name used when the member has
+    none. Accepts plain records or the dataclasses.
+    """
+    fallback_names = fallback_names if isinstance(fallback_names, dict) else {}
+    out: dict = {}
+    reference_seen: dict = {}
+    for reference in references or []:
+        base = reference_member_labels(_field(reference, "name") or "Reference")["display_name"] \
+            or "Reference"
+        reference_seen[base] = reference_seen.get(base, 0) + 1
+        seen = reference_seen[base]
+        reference_part = f"{base} ({seen})" if seen > 1 else base
+        rows = []
+        for member in _field(reference, "members", []) or []:
+            member_id = str(_field(member, "member_id") or "")
+            if not member_id or member_id in out or any(row[0] == member_id for row in rows):
+                continue
+            member_part = str(_field(member, "name") or "").strip() \
+                or str(fallback_names.get(member_id) or "").strip()
+            rows.append((member_id, member_part, str(_field(member, "handle") or "").strip()))
+        groups: dict = {}
+        for row in rows:
+            groups.setdefault(row[1], []).append(row)
+        for group in groups.values():
+            unhandled = [row for row in group if not row[2]]
+            for member_id, member_part, handle in group:
+                suffix = ""
+                if len(group) > 1:
+                    if handle:
+                        suffix = f" @{handle}"
+                    elif len(unhandled) > 1:
+                        suffix = f" ({[row[0] for row in unhandled].index(member_id) + 1})"
+                out[member_id] = {
+                    "reference": reference_part,
+                    "member": member_part,
+                    "suffix": suffix,
+                    "text": (f"{reference_part} · {member_part}{suffix}" if member_part
+                             else f"{reference_part}{suffix}"),
+                }
+    return out
+
+
 def member_prompt_fragment(pattern: str, index: int, prompt: str, name: str,
                            registry_numbers: dict | None = None,
                            member_name: str = "") -> str:

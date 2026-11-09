@@ -12,6 +12,7 @@ import { formatReferenceTag } from "./reference_library_model.js";
 import {
     REFERENCE_VERDICT,
     REFERENCE_VERDICT_LABEL,
+    referenceItemLabel,
     resolveReferenceVerdicts,
 } from "./reference_resolution.js";
 import { referenceItemEffectiveBounds } from "./scene_reference_geometry.js";
@@ -1451,8 +1452,10 @@ export function _drawClips(host, ctx, width) {
                     ctx.restore();
                 }
                 const resolvedMembers = (item.members || []).map((memberRef) => host._referenceMemberForRef?.(memberRef)).filter(Boolean);
+                // Each Reference once, then which of its members: the Reference
+                // name alone cannot tell a sheet from a bottle of the same Prop.
                 const label = item.prompt_override
-                    || resolvedMembers.map(({ reference }) => reference.name).filter((value, index, values) => values.indexOf(value) === index).join(" + ")
+                    || referenceItemLabel(item.members, host._referenceMemberDisplayNames?.())
                     || "Reference";
                 if (x2 - x1 > 20) {
                     const scale = host._scaleTimeline;

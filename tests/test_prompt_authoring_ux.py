@@ -2900,7 +2900,7 @@ console.log(JSON.stringify({{
         "eligible": False,
         "appliesNow": False,
         "reason": "not staged in this scene",
-        "suffix": " - not staged in this scene",
+        "suffix": " — not staged in this scene",
     }
     assert result["assetlessEligibility"] == {
         "eligible": True, "appliesNow": True, "reason": "", "suffix": "",

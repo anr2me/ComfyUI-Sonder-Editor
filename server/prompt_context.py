@@ -17,7 +17,7 @@ import uuid
 from collections import defaultdict
 
 from . import prompt_channel_templates, prompt_payload, prompt_tokens
-from .reference_prompt_formatter import reference_member_labels
+from .reference_prompt_formatter import reference_member_display_names, reference_member_labels
 from .reference_resolution import REFERENCE_VERDICT_LABEL
 
 
@@ -2889,28 +2889,69 @@ def _setup_member_prompt(member_id, context) -> str:
     return ""
 
 
-def _reference_source_label(source_id, context) -> str:
-    """A staged member's display name for user-facing messages, quoted.
+def _reference_source_display(source_id, context) -> str:
+    """A staged member's display name for user-facing messages, unquoted.
 
-    The setup row's `display_name` ("Entity · Member") first, then the
-    Library record, then the raw id when neither names it.
+    The one member label (`reference_member_display_names`, "Prop · Sonder",
+    unique across the Library) from the context's Library, then the setup
+    row's `display_name` (built by the same rule), then the raw id when
+    neither names it. The Library map is built once per compile.
     """
     source_id = str(source_id or "")
+    names = context.get("_member_display_names")
+    if names is None:
+        names = reference_member_display_names(
+            [value for value in (context.get("references") or []) if isinstance(value, dict)])
+        context["_member_display_names"] = names
+    text = str((names.get(source_id) or {}).get("text") or "").strip()
+    if text:
+        return text
     for row in (context.get("setup_manifest", {}).get("presentation") or []):
         row_member_id = str(
             row.get("member_id") or row.get("video_member_id") or "")
         if row_member_id == source_id and str(row.get("display_name") or "").strip():
-            return repr(str(row["display_name"]).strip())
-    for reference in context.get("references") or []:
-        if not isinstance(reference, dict):
-            continue
-        for member in reference.get("members") or []:
-            if isinstance(member, dict) and str(member.get("member_id") or "") == source_id:
-                display = reference_member_labels(
-                    reference.get("name") or "", member.get("name") or "")["display_name"]
-                if display:
-                    return repr(display)
-    return repr(source_id)
+            return str(row["display_name"]).strip()
+    return source_id
+
+
+def _reference_source_label(source_id, context) -> str:
+    """`_reference_source_display`, quoted, for messages that quote it."""
+    return repr(_reference_source_display(source_id, context))
+
+
+def _definition_line_members(owner, segments) -> list[str]:
+    """The Library members whose prose a definition line can carry.
+
+    A Subject line cites its visual sources (`SEGMENT_SOURCES.member_ids`), an
+    audio line names its member on the label, and a physical line is one
+    member's slot. An identity-only line cites none.
+    """
+    kind = owner[0] if owner else ""
+    if kind == "subject_definition":
+        for segment in segments or []:
+            if segment.get("kind") == SEGMENT_SOURCES:
+                return [str(value) for value in segment.get("member_ids") or [] if value]
+        return []
+    if kind == "physical_definition":
+        return [str(owner[2])] if len(owner) > 2 and owner[2] else []
+    if kind == "audio_definition":
+        for segment in segments or []:
+            if segment.get("kind") == SEGMENT_LABEL and segment.get("member_id"):
+                return [str(segment["member_id"])]
+    return []
+
+
+def _authored_prose_key(segments) -> str:
+    """A line's authored prose, compared apart from its derived labels.
+
+    Whitespace is collapsed and one closing full stop dropped, because a
+    Subject line drops it before its `from <Picture N>` citation
+    (`_definition_before_source`) while the Picture line keeps it.
+    """
+    text = " ".join("".join(
+        str(segment.get("text") or "") for segment in segments or []
+        if segment.get("authored")).split())
+    return text[:-1].rstrip() if text.endswith(".") else text
 
 
 def _subject_definition(config, unit, context) -> tuple[str, str]:
@@ -5597,13 +5638,68 @@ def compile_prompt_context(*, global_documents=None, global_channels=None,
     emitted_groups = {}
     emitted_subject_definitions = set()
     context["_mentioned_subjects"] = {}
-    # Same resolved text, different owner key. Definition/retention dedupe is
-    # per semantic unit OR physical slot, so one member's Library prose reaching
-    # a compile through both an identity chip and a physical chip produces two
-    # owners by construction and passes the dedupe in silence. Advisory, not
-    # blocking: emitting a subject and its source picture is legitimate, the
-    # author just cannot see the repetition from either chip.
+    # Same resolved text, different owner key, for lines that cite no member
+    # (retention, identity-only definitions): an advisory, never blocking.
     emitted_group_text = {}
+    # One member's prose reaching a compile through two chips. Definition
+    # dedupe is per semantic unit OR physical slot, so the same Library prose
+    # sent by a Subject chip ("<Subject 1> is X from <Picture 1>") and a
+    # Picture chip ("<Picture 1> is X.") is two owners by construction and
+    # passes the dedupe in silence; the whole lines never compare equal,
+    # because their labels differ. Keyed by channel, member and authored
+    # prose instead, so different members that happen to share prose, and
+    # one chip's own lines, are never called duplicates. Advisory, not
+    # blocking: emitting a Subject and its source picture is legitimate.
+    emitted_member_prose = {}
+    warned_member_prose = set()
+
+    def note_shared_member_prose(keys, owner, attachment, origin, channel,
+                                 capability, capability_kind):
+        current = {"owner": owner, "attachment_id": attachment["attachment_id"],
+                   "origin": origin, "capability_id": capability["capability_id"]}
+        for key in keys:
+            first = emitted_member_prose.setdefault(key, current)
+            # One chip never warns against itself. A global chip and a section
+            # chip may carry the same id (ids are scope-local), so the scope is
+            # part of what makes a chip "the same one".
+            if (first is current or first["owner"] == owner
+                    or (first["attachment_id"], first["origin"])
+                    == (current["attachment_id"], current["origin"])):
+                continue
+            # The Picture chip's line is the redundant one: the Subject line
+            # already cites `from <Picture N>`. A Subject chip is never told to
+            # untick its Definition, which carries its other lines too; two
+            # Subject chips sharing a source are left alone.
+            target = next((row for row in (current, first)
+                           if row["owner"][0] == "physical_definition"), None)
+            if target is None:
+                continue
+            seen = (target["attachment_id"], target["origin"],
+                    target["capability_id"], channel)
+            if seen in warned_member_prose:
+                continue
+            warned_member_prose.add(seen)
+            population = str(target["owner"][1] if len(target["owner"]) > 1 else "")
+            population_label = next((
+                str(declaration.get("label") or "")
+                for declaration in physical_population_declarations(resolved_profile)
+                if str(declaration.get("ordinal_key") or declaration.get("key") or "") == population
+            ), "") or "source"
+            capability_label = str((_reference_derived_view(resolved_profile).get(
+                capability_kind) or {}).get("label") or "Definition")
+            warnings.append({
+                "code": "duplicate_reference_emission",
+                "attachment_id": target["attachment_id"],
+                "origin": target["origin"],
+                "channel_key": channel,
+                "capability_id": target["capability_id"],
+                "capability_kind": capability_kind,
+                "message": (
+                    f"Text for {_reference_source_display(key[1], context)} is already "
+                    "sent by another chip in this channel. To send it once, untick "
+                    f"{capability_label} under Prompt parts and routing on this chip "
+                    f"and on any other chip sending this {population_label}."),
+            })
     prompt_token_diagnostics_seen = set(
         prevalidated_prompt_token_diagnostics)
     unresolved_attachment_handles = set()
@@ -5733,22 +5829,33 @@ def compile_prompt_context(*, global_documents=None, global_channels=None,
                                         "conflicting text."),
                         })
                     continue
-                text_identity = (capability_kind, channel, line)
-                first_owner = emitted_group_text.get(text_identity)
-                if first_owner is not None and first_owner != owner:
-                    warnings.append({
-                        "code": "duplicate_reference_emission",
-                        "attachment_id": attachment["attachment_id"],
-                        "origin": origin,
-                        "channel_key": channel,
-                        "capability_id": capability["capability_id"],
-                        "message": ("The same Reference text already emitted "
-                                    "for a different subject or slot in this "
-                                    "channel; blank one chip's field to stop it "
-                                    "repeating."),
-                    })
-                elif first_owner is None:
-                    emitted_group_text[text_identity] = owner
+                prose = (_authored_prose_key(segments)
+                         if capability_kind == "definitions" else "")
+                members = _definition_line_members(owner, segments) if prose else []
+                if members:
+                    note_shared_member_prose(
+                        [(channel, member_id, prose) for member_id in members],
+                        owner, attachment, origin, channel, capability,
+                        capability_kind)
+                else:
+                    text_identity = (capability_kind, channel, line)
+                    first_owner = emitted_group_text.get(text_identity)
+                    if first_owner is not None and first_owner != owner:
+                        warnings.append({
+                            "code": "duplicate_reference_emission",
+                            "attachment_id": attachment["attachment_id"],
+                            "origin": origin,
+                            "channel_key": channel,
+                            "capability_id": capability["capability_id"],
+                            "capability_kind": capability_kind,
+                            "message": ("The same Reference text is already sent "
+                                        "for a different subject or slot in this "
+                                        "channel. To send it once, untick that "
+                                        "part under Prompt parts and routing on "
+                                        "this chip."),
+                        })
+                    elif first_owner is None:
+                        emitted_group_text[text_identity] = owner
                 emitted_groups[line_identity] = line
                 kept.append(line)
                 definition_owners.update(defined_unit_ids(owner, segments))
