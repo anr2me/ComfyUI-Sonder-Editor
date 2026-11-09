@@ -443,7 +443,8 @@ Empty optional fields can stay empty; address the fields named by advisories.
 A chip can name a Reference that doesn't win the current window — its lane is
 muted or hidden, its item is superseded, below threshold, or simply outside.
 The render still goes ahead, and the chip raises an advisory instead of
-blocking the job. A **deleted** source blocks the job.
+blocking the job. A deleted source doesn't block it either; see the next
+section.
 
 What becomes of the chip's own authored text is a policy you choose:
 
@@ -458,6 +459,21 @@ text** row offering *Project default*, *Drop* and *Keep*, and a chip that
 overrides the project shows a small `KEEP` or `DROP` badge. The override is
 local to that chip **including linked copies**, so splitting a section leaves
 the two halves free to differ.
+
+### When a Reference source is deleted
+
+Deleting a Library member, a Reference or a staged item doesn't stop
+generation. A chip that names it leaves that part out of the prompt and keeps
+the rest; a chip with nothing left is left out whole. In Prompt Management the
+chip shows **Source removed**, or a count such as **1 source removed** when it
+still names others. Adding the scene to the Render Queue shows one warning that
+names the chips, and so does each run.
+
+Whether the run still works without that Reference is up to the nodes in your
+graph. To fix the chip, open it and choose another source, or remove it.
+
+A Subject chip whose member was deleted isn't marked: the Subject keeps its
+description and loses only that picture.
 
 ### Mentions
 

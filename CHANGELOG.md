@@ -21,6 +21,7 @@ a fresh `[Unreleased]` block.
   - Reference Bridge output labels name the member instead of the Reference's subject or context class (`r01 · Picture 1 · Prop · Sonder`). A saved workflow shows the new labels the next time its Bridge refreshes.
 
   Members of one Reference that share a name are told apart by their @handle or a number.
+- Deleting a Library member, a Reference or a staged Reference item no longer stops generation. A chip that names it leaves that part out of the prompt and keeps the rest; a chip with nothing left is left out whole. In Prompt Management the chip shows **Source removed**, or a count such as **1 source removed** when it still names others. Adding to the Render Queue shows one warning naming the chips, and so does each run. Whether the run can still work without that Reference is up to the nodes in your graph. A typed `@picture(…)`-style reference to a deleted source leaves out the line it is on.
 
 ### Fixed
 - Reference Lane Setup now focuses the first unsupported role when it opens, not the last. An unsupported recipe value no longer takes focus ahead of a role above it.

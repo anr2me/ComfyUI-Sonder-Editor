@@ -972,6 +972,154 @@ def _reference_source_ids(source, key) -> list[str]:
                               if str(value or "")))
 
 
+REFERENCE_SOURCE_REMOVED = "reference_source_removed"
+
+
+def _reference_namespaces(context) -> dict:
+    """Every id a Reference chip or stable token can name, as it stands now.
+
+    The project keeps no record of deletions, so "removed" can only mean
+    absent from all of these. ``catalog`` is False for a legacy project-less
+    compile, which has no deletion verdict and keeps its fail-open contract.
+    """
+    references = context.get("references") if isinstance(context, dict) else None
+    staging = (context.get("reference_staging") if isinstance(context, dict) else None) or {}
+    members, assets, reference_ids = set(), set(), set()
+    for reference in references if isinstance(references, list) else []:
+        if not isinstance(reference, dict):
+            continue
+        reference_ids.add(str(reference.get("reference_id") or ""))
+        for member in reference.get("members") or []:
+            if isinstance(member, dict):
+                members.add(str(member.get("member_id") or ""))
+                assets.add(str(member.get("asset_id") or ""))
+    for values in (members, assets, reference_ids):
+        values.discard("")
+    return {
+        "catalog": isinstance(references, list),
+        "members": members, "assets": assets, "references": reference_ids,
+        "units": set((context.get("semantic_units_by_id") or {}).keys()),
+        "staging": bool(staging.get("resolved")),
+        "items": set((staging.get("items") or {}).keys()),
+    }
+
+
+def _token_source_removed(source_id, namespaces) -> bool:
+    """Whether a stable token names an id that exists nowhere any more.
+
+    A token can name any ordinal alias the setup publishes (member, video
+    member, asset, item, slot) or a semantic unit, so absence is checked
+    against every namespace. A slot id (``lane:item:member``) is removed when
+    its member or its item is gone; an existing but unstaged id is not removed
+    and keeps blocking as ``unresolved_prompt_token``.
+    """
+    value = str(source_id or "")
+    if not value or not namespaces.get("catalog"):
+        return False
+    if any(value in namespaces[key] for key in
+           ("members", "assets", "references", "units", "items")):
+        return False
+    parts = value.rsplit(":", 2)
+    if len(parts) == 3 and parts[0] and parts[1] and parts[2]:
+        _lane_id, item_id, member_id = parts
+        return (member_id not in namespaces["members"]
+                or (namespaces["staging"] and item_id not in namespaces["items"]))
+    return True
+
+
+def _prune_removed_reference_sources(attachments, origins, context, profile,
+                                     *, h3_reference) -> dict:
+    """Drop the sources a Reference chip names that no longer exist.
+
+    The single authority for "removed" in a compile (Phase 3b). It edits the
+    compile-local normalized attachments and ``semantic_units_by_id`` in place,
+    so every later reader -- validation, dormancy, the prose policy, task
+    types and the renderers -- sees the same pruned sources. Nothing at rest
+    changes: chips keep the removed ids and repair stays possible.
+
+    A chip left with no source at all is turned off for this compile, exactly
+    like a disabled chip, including segment selection, so a section that held
+    only that chip neither covers the window nor cuts another section's hold.
+    It is marked ``_source_removed`` so it still warns (see the warning pass).
+    A chip authored with no source is untouched, so it still reports
+    ``missing_reference_source``.
+    """
+    namespaces = _reference_namespaces(context)
+    model = {"namespaces": namespaces, "rows": defaultdict(list), "fully": set()}
+    units = context.get("semantic_units_by_id") or {}
+    catalog = namespaces["catalog"]
+    unit_removed = {}
+    if h3_reference and catalog:
+        for unit_id, unit in units.items():
+            sources = unit.get("sources") or []
+            kept = [value for value in sources
+                    if not isinstance(value, dict)
+                    or str(value.get("member_id") or "") in namespaces["members"]]
+            if len(kept) != len(sources):
+                unit_removed[unit_id] = [
+                    str(value.get("member_id") or "") for value in sources
+                    if isinstance(value, dict) and value not in kept]
+                unit["sources"] = kept
+    for attachment, origin in zip(attachments, origins):
+        if not attachment.get("enabled", True) or attachment.get("kind") != "reference":
+            continue
+        source = attachment.get("source")
+        if not isinstance(source, dict):
+            continue
+        key = (str(origin or ""), str(attachment.get("attachment_id") or ""))
+        rows = []
+        had_source = False
+        if h3_reference:
+            unit_ids = _reference_source_ids(source, "semantic_unit_ids")
+            had_source = had_source or bool(unit_ids)
+            # Without a catalog a missing unit stays the legacy blocker.
+            kept_units = [unit_id for unit_id in unit_ids
+                          if unit_id in units or not catalog]
+            for unit_id in unit_ids:
+                if unit_id not in kept_units:
+                    rows.append({"kind": "subject", "id": unit_id})
+                else:
+                    rows.extend({"kind": "member", "id": member_id}
+                                for member_id in unit_removed.get(unit_id, []))
+            if len(kept_units) != len(unit_ids):
+                source["semantic_unit_ids"] = kept_units
+            for declaration in physical_population_declarations(profile):
+                source_key = str(declaration.get("source_key") or "")
+                values = source.get(source_key)
+                if not isinstance(values, list):
+                    continue
+                had_source = had_source or any(str(value or "") for value in values)
+                if not catalog:
+                    continue
+                kind = str(declaration.get("token_kind")
+                           or declaration.get("key") or "physical")
+                kept = [value for value in values
+                        if not str(value or "")
+                        or str(value) in namespaces["members"]]
+                if len(kept) != len(values):
+                    rows.extend({"kind": kind, "id": str(value)} for value in values
+                                if value not in kept)
+                    source[source_key] = kept
+        item_id = str(source.get("reference_item_id") or "")
+        had_source = had_source or bool(item_id)
+        if item_id and namespaces["staging"] and item_id not in namespaces["items"]:
+            rows.append({"kind": "item", "id": item_id})
+            source["reference_item_id"] = ""
+        if not rows:
+            continue
+        model["rows"][key].extend(rows)
+        remaining = (bool(_reference_source_ids(source, "semantic_unit_ids"))
+                     or bool(str(source.get("reference_item_id") or ""))
+                     or any(_reference_source_ids(
+                         source, str(declaration.get("source_key") or ""))
+                         for declaration in physical_population_declarations(profile)))
+        if had_source and not remaining:
+            attachment["enabled"] = False
+            attachment["_source_removed"] = True
+            model["fully"].add(key)
+    return model
+
+
 def dormant_reference_identities(attachment, context) -> list[str]:
     """Selected sourced identities with no winning member in this window.
 
@@ -4404,6 +4552,13 @@ def compile_prompt_context(*, global_documents=None, global_channels=None,
         for unit in (normalize_semantic_unit(value)
                      for value in context.get("semantic_units") or [])
     }
+    # Deleted Reference sources never block (Phase 3b): prune them once, here,
+    # before anything reads a chip's sources. See the function's docstring.
+    removed_reference_sources = _prune_removed_reference_sources(
+        scene_attachments, scene_attachment_origins, context, resolved_profile,
+        h3_reference="minimax_reference_setup" in {
+            str(value) for value in resolved_profile.get("validators") or []
+            if isinstance(value, str)})
 
     # Resolve sparse capability enablement before the preliminary segment vote.
     # Otherwise a capability disabled by its shared Reference/identity default
@@ -4990,14 +5145,6 @@ def compile_prompt_context(*, global_documents=None, global_channels=None,
             reference_diagnostic(
                 warnings, code, message, attachment_id, **details)
 
-        reference_catalog_available = isinstance(context.get("references"), list)
-        known_member_ids = {
-            str(member.get("member_id") or "")
-            for reference in context.get("references") or []
-            if isinstance(reference, dict)
-            for member in reference.get("members") or []
-            if isinstance(member, dict)
-        }
         member_populations = defaultdict(set)
         for declaration in physical_population_declarations(resolved_profile):
             population = str(declaration.get("key") or "")
@@ -5046,6 +5193,9 @@ def compile_prompt_context(*, global_documents=None, global_channels=None,
             for unit_id in unit_ids:
                 unit = context["semantic_units_by_id"].get(unit_id)
                 if unit is None:
+                    # Only a project-less compile reaches this: with a catalog,
+                    # `_prune_removed_reference_sources` already dropped the id.
+                    # Expiry: when project-less compilation is retired.
                     reference_error(
                         "broken_reference_source",
                         f"Reference Subject {unit_id!r} no longer exists; rebind the visible chip.",
@@ -5060,17 +5210,9 @@ def compile_prompt_context(*, global_documents=None, global_channels=None,
                         f"Prompt identity {unit.get('name') or unit_id!r} uses unsupported kind {identity_kind!r}.",
                         attachment["attachment_id"])
                     continue
+                # Sources naming deleted members were pruned before validation.
                 sources = [value for value in unit.get("sources") or []
                            if isinstance(value, dict)]
-                broken_sources = [value for value in sources
-                                  if reference_catalog_available
-                                  and str(value.get("member_id") or "")
-                                  not in known_member_ids]
-                if broken_sources:
-                    reference_error(
-                        "broken_reference_source",
-                        f"Prompt identity {unit.get('name') or unit_id!r} names deleted physical Reference members.",
-                        attachment["attachment_id"])
                 if sources and unit_id not in (ordinal_manifest.get(
                         identity_ordinal_key(identity_kind)) or {}):
                     dormant_candidate(attachment, attachment_origin, unit_id=unit_id)
@@ -5151,14 +5293,10 @@ def compile_prompt_context(*, global_documents=None, global_channels=None,
                                         for row in duplicate_slots) + ".",
                             attachment["attachment_id"])
                     if str(source_id) not in known:
-                        # No catalog means no deletion verdict (legacy project-less
-                        # compile); keep that existing fail-open contract.
-                        if reference_catalog_available and str(source_id) not in known_member_ids:
-                            reference_error("broken_reference_source",
-                                "A bound physical Reference member no longer exists; rebind the chip.",
-                                attachment["attachment_id"])
-                        else:
-                            dormant_candidate(attachment, attachment_origin, member_id=str(source_id))
+                        # A deleted member was pruned before validation, so an
+                        # id without an ordinal is unstaged here, or the compile
+                        # has no catalog (legacy fail-open): both are dormant.
+                        dormant_candidate(attachment, attachment_origin, member_id=str(source_id))
                         continue
                     authored = str((
                         config.get("audio_definition")
@@ -5183,11 +5321,8 @@ def compile_prompt_context(*, global_documents=None, global_channels=None,
         error_count = len(errors)
         item_id = str(attachment.get("source", {}).get("reference_item_id") or "")
         generic_reference = (context.get("generic_references") or {}).get(item_id)
-        if item_id and staging.get("resolved") and item_id not in staged_items:
-            errors.append({"code": "broken_reference_source",
-                "attachment_id": attachment["attachment_id"],
-                "message": "A bound Reference item no longer exists; rebind the chip."})
-        elif item_id and "minimax_base_format" in set(resolved_profile.get("validators") or []):
+        # A bound item that is gone from staging was pruned before validation.
+        if item_id and "minimax_base_format" in set(resolved_profile.get("validators") or []):
             warnings.append({"code": "reference_not_supported_by_format",
                 "attachment_id": attachment["attachment_id"], "origin": attachment_origin,
                 "message": "This text-only Prompt Format does not support Reference inputs."})
@@ -5212,9 +5347,49 @@ def compile_prompt_context(*, global_documents=None, global_channels=None,
                 (attachment_origin, attachment["attachment_id"]))
         for diagnostic in errors[error_count:]:
             diagnostic.setdefault("origin", attachment_origin)
-    def inspect_attachment_tokens(value, attachment):
+    def drop_removed_token_lines(value, attachment, origin, declarations):
+        """Omit each rendered line whose stable token names a removed source.
+
+        Tokens resolve on rendered lines, after the field fallback chain has
+        chosen its text, so dropping the line omits that field's text without
+        letting Library prose take its place (Phase 3b). Other lines stay.
+        """
+        namespaces = removed_reference_sources["namespaces"]
+        # Only kinds that name a Reference source can be removed by a Library
+        # delete: physical populations and identities. `@shot` names a Shot
+        # chip in this window and keeps its own out-of-window blocker.
+        reference_kinds = {
+            kind for kind, declaration in declarations.items()
+            if declaration.get("physical") is True
+            or "identity_source_mode" in declaration}
+        text = str(value or "")
+        if not namespaces["catalog"] or not any(
+                row["kind"] in reference_kinds
+                for row in prompt_tokens.references(text, declarations)):
+            return value
+        kept, dropped = [], []
+        for line in text.split("\n"):
+            removed = [row["source_id"] for row in prompt_tokens.references(line, declarations)
+                       if row["kind"] in reference_kinds
+                       and _token_source_removed(row["source_id"], namespaces)]
+            if removed:
+                dropped.extend(removed)
+            else:
+                kept.append(line)
+        if not dropped:
+            return value
+        key = (str(origin or ""), str(attachment.get("attachment_id") or ""))
+        rows = removed_reference_sources["rows"][key]
+        for source_id in dropped:
+            row = {"kind": "token", "id": str(source_id)}
+            if row not in rows:
+                rows.append(row)
+        return "\n".join(kept)
+
+    def inspect_attachment_tokens(value, attachment, origin=""):
         """Resolve stable tokens and return every integrity diagnostic."""
         declarations = prompt_token_declarations(resolved_profile)
+        value = drop_removed_token_lines(value, attachment, origin, declarations)
         duplicate_slots = (context.get("setup_manifest", {}).get(
             "duplicate_member_slots") or {})
         diagnostics = []
@@ -5355,7 +5530,7 @@ def compile_prompt_context(*, global_documents=None, global_channels=None,
                             attachment, capability, render_context):
                         line = _resolve_handle_mentions(line, context)
                         line, _diagnostics = inspect_attachment_tokens(
-                            line, attachment)
+                            line, attachment, "global")
                         identity = (capability_kind, owner, channel)
                         previous = emitted.get(identity)
                         if previous is not None:
@@ -5387,7 +5562,7 @@ def compile_prompt_context(*, global_documents=None, global_channels=None,
                             attachment["attachment_id"], []))
                     value = _resolve_handle_mentions(value, context)
                     value, _diagnostics = inspect_attachment_tokens(
-                        value, attachment)
+                        value, attachment, "global")
                     if len(value.encode("utf-8")) > MAX_ATTACHMENT_OUTPUT:
                         new_blockers.add(("global", attachment["attachment_id"]))
                         continue
@@ -5485,7 +5660,8 @@ def compile_prompt_context(*, global_documents=None, global_channels=None,
                         global_capability_effective(attachment, capability)):
                     continue
                 value = _render_reference_capability(attachment, capability, render_context)
-                _resolved, token_diagnostics = inspect_attachment_tokens(value, attachment)
+                _resolved, token_diagnostics = inspect_attachment_tokens(
+                    value, attachment, attachment_origin)
                 for diagnostic in token_diagnostics:
                     diagnostic_key = attachment_token_diagnostic_key(diagnostic, attachment_origin)
                     if diagnostic_key in prevalidated_prompt_token_diagnostics:
@@ -5730,7 +5906,7 @@ def compile_prompt_context(*, global_documents=None, global_channels=None,
 
     def resolve_attachment_tokens(value, attachment, origin=""):
         resolved, token_diagnostics = inspect_attachment_tokens(
-            value, attachment)
+            value, attachment, origin)
         for diagnostic in token_diagnostics:
             diagnostic_key = attachment_token_diagnostic_key(
                 diagnostic, origin)
@@ -7107,8 +7283,10 @@ def compile_prompt_context(*, global_documents=None, global_channels=None,
     # not enumerate.
     copy_plan = None
     if copy_plan_for is not None:
+        # The compile's own attachments, so Copy reads a chip with its removed
+        # Reference sources already left out (Phase 3b), like the render does.
         located = _locate_capability(
-            copy_plan_for, global_attachments, sections, resolved_profile, keys)
+            copy_plan_for, global_attachment_values, raw_sections, resolved_profile, keys)
         # Copy is an explicit author handoff for the selected capability, not a
         # render. The scene-wide Summary task union is render scratch state and
         # would replace this chip's own authored task selection with a peer's.
@@ -7120,6 +7298,58 @@ def compile_prompt_context(*, global_documents=None, global_channels=None,
                      {"lines": [], "frozen_static": [], "frozen_ordinal": [],
                       "refused": "That capability is not staged in this scene."})
 
+    # One warning per chip that lost a removed source, emitted only now: the
+    # removals are found in validation and in several render passes, and the
+    # diagnostic dedupe keys on every detail, so emitting from inside them
+    # would split one chip into several rows. Dormant (unselected) sections
+    # never warn, like every other diagnostic of theirs.
+    section_numbers = {str(value.get("prompt_id") or ""): index + 1
+                       for index, value in enumerate(raw_sections)}
+    selected_keys = {(str(origin or ""), str(attachment.get("attachment_id") or ""))
+                     for attachment, origin in all_attachment_origins}
+    # A wholly removed chip is inert like a disabled one, so a section holding
+    # only it is no longer selected. It still warns when its section is unmuted
+    # and its authored frames overlap the window: an advisory approximation of
+    # "would have been selected", never used for output.
+    for value in raw_sections:
+        if value.get("muted"):
+            continue
+        try:
+            start = int(value.get("start_frame", 0) or 0)
+            end = int(value.get("end_frame", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if end <= int(window_start) or start >= int(window_end):
+            continue
+        origin = str(value.get("prompt_id") or "section")
+        for attachment in value["attachments"]:
+            if attachment.get("_source_removed"):
+                selected_keys.add((origin, str(attachment.get("attachment_id") or "")))
+    for key, rows in removed_reference_sources["rows"].items():
+        if key not in selected_keys or not rows:
+            continue
+        origin, attachment_id = key
+        unique = list({(row["kind"], row["id"]): row for row in rows}.values())
+        whole = key in removed_reference_sources["fully"]
+        count = len(unique)
+        location = ("Global" if origin == "global"
+                    else f"Section {section_numbers.get(origin, 0) or '?'}")
+        warnings.append({
+            "code": REFERENCE_SOURCE_REMOVED,
+            "attachment_id": attachment_id,
+            "origin": origin,
+            "location": location,
+            "omitted": "chip" if whole else "partial",
+            "removed": [dict(row) for row in unique],
+            "message": (
+                f"{location}: every Reference source this chip names was removed, "
+                "so the chip is left out of the prompt. Rebind it or delete it."
+                if whole else
+                f"{location}: {count} Reference source{'s' if count != 1 else ''} "
+                "this chip names " + ("was" if count == 1 else "were")
+                + " removed, so that part is left out of the prompt. "
+                "Rebind the chip or remove the source."),
+        })
     if h3_task_type_preview is not None and not any(h3_summary_prefixes.values()):
         # No live Summary in this window, so no prefix printed: say so rather
         # than advertise task types the prompt never carried.

@@ -9531,13 +9531,18 @@ def test_capability_diagnostic_decoration_does_not_poison_siblings():
     source = _source("web/js/editor_prompt_panel.js")
     start = source.index('        for (const chip of panel.querySelectorAll("[data-attachment-id]"))')
     loop = source[start:source.index('        refreshWritingCompiled(payload);', start)]
+    # The sweep also paints the Phase 3b Source removed mark through this helper.
+    mark_start = source.index("export function paintSourceRemovedMark(")
+    mark = source[mark_start:source.index("\n}\n", mark_start) + 2].replace(
+        "export function", "function", 1)
     url = (ROOT / "web/js/prompt_context_diagnostics.js").as_uri()
     result = _run_node(f"""
-const {{buildPromptContextDiagnostics,promptContextDiagnosticTitle,promptCapabilityDiagnostics}} = await import({json.dumps(url)});
+const {{buildPromptContextDiagnostics,promptContextDiagnosticTitle,promptCapabilityDiagnostics,REFERENCE_SOURCE_REMOVED}} = await import({json.dumps(url)});
+{mark}
 const state=buildPromptContextDiagnostics({{errors:[{{attachment_id:"a",channel_key:"visual",capability_id:"bad",code:"conflicting_emission"}}]}});
 const chips=[{{capabilityId:"bad",channelKey:"visual"}},{{capabilityId:"good",channelKey:"visual"}},{{capabilityId:"bad",channelKey:"speech"}},{{}}].map(scope=>({{
  dataset:{{attachmentId:"a",...scope}},style:{{}},title:"State: linked_elsewhere",invalid:false,
- closest:()=>null,removeAttribute(){{this.invalid=false;}},setAttribute(){{this.invalid=true;}}
+ closest:()=>null,querySelector:()=>null,removeAttribute(){{this.invalid=false;}},setAttribute(){{this.invalid=true;}}
 }}));
 const panel={{querySelectorAll:()=>chips}},COLORS={{dangerText:"red",warningText:"yellow"}};
 {loop}

@@ -844,7 +844,7 @@ export function mountReferenceLibrary(container, host) {
                                 unitIds.has(id))).length;
                     }
                     const usage = staged || chips || unitIds.size
-                        ? `\n\nWhere used: ${staged} staged item(s), ${unitIds.size} Subject unit(s), ${chips} Context chip(s). Deletion keeps broken chips visible for repair.`
+                        ? `\n\nWhere used: ${staged} staged item(s), ${unitIds.size} Subject unit(s), ${chips} Context chip(s). The parts of chips that name it are left out when you generate; Prompt Management marks those chips Source removed.`
                         : "";
                     if (!host.confirm(`Delete “${reference.name}” and its ${reference.members?.length || 0} member(s)?${usage}`)) return;
                     // The displayed row at the click, own pending edits included:
@@ -969,7 +969,7 @@ export function mountReferenceLibrary(container, host) {
                                             unitIds.has(id))).length;
                                 }
                                 const usage = staged || chips || unitIds.size
-                                    ? `\n\nWhere used: ${staged} staged item(s), ${unitIds.size} Subject unit(s), ${chips} Context chip(s). Deletion keeps broken chips visible for repair.`
+                                    ? `\n\nWhere used: ${staged} staged item(s), ${unitIds.size} Subject unit(s), ${chips} Context chip(s). The parts of chips that name it are left out when you generate; Prompt Management marks those chips Source removed.`
                                     : "";
                                 if (host.confirm(`Remove this Library member?${usage}`)) {
                                     // The displayed row at the click, as stored:

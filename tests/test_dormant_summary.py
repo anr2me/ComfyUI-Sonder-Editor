@@ -265,7 +265,7 @@ def test_dormant_live_preview_uses_execution_compile_and_reports_degradation(mon
         return {
             "prompt": "execution-resolved",
             "warnings": [],
-            "errors": [{"code": "broken_reference_source"}],
+            "errors": [{"code": "unsupported_attachment_kind"}],
         }
 
     monkeypatch.setattr(Scene, "compile_for_execution", compile_for_execution)
@@ -280,7 +280,7 @@ def test_dormant_live_preview_uses_execution_compile_and_reports_degradation(mon
     assert calls and calls[0][0] is project
     assert summary["active_scene"]["preview_prompt"] == ""
     assert summary["active_scene"]["preview_prompt_degraded"] is True
-    assert summary["active_scene"]["preview_prompt_error_code"] == "broken_reference_source"
+    assert summary["active_scene"]["preview_prompt_error_code"] == "unsupported_attachment_kind"
 
 
 def test_dormant_live_preview_matches_candidate_execution_path(monkeypatch):

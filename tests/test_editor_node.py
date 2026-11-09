@@ -173,6 +173,91 @@ def test_execute_coerces_context_widgets_to_ints(tmp_path, monkeypatch):
     assert "render_cache_enabled" not in optional_fields
 
 
+@pytest.mark.parametrize("demand", ["prompt", "frames", "queued", "bridge"])
+def test_live_removed_reference_sources_run_and_note_the_run_once(
+    tmp_path, monkeypatch, demand
+):
+    """Phase 3b: a live compile whose chips lost removed sources runs, and the
+    Editor hands its warnings to run feedback, only when the prompt is used."""
+    editor_node = _import_editor_node(tmp_path, monkeypatch)
+    torch = importlib.import_module("torch")
+    removed = {"code": "reference_source_removed", "attachment_id": "c", "origin": "global",
+               "location": "Global", "omitted": "chip", "removed": [], "message": "m"}
+
+    class Scene:
+        scene_id = "scene-1"
+        name = "Scene 1"
+        duration_frames = 8
+        width = 0
+        height = 0
+        fps = 0
+        guide_frames = []
+
+        @staticmethod
+        def compile_for_execution(*_args, **_kwargs):
+            return {"prompt": "text without the chip", "errors": [], "warnings": [removed]}
+
+    class Project:
+        fps = 24.0
+        resolution = (4, 4)
+        project_dir = str(tmp_path)
+        metadata = {}
+        template_id = "free"
+        frame_constraint = None
+        _execution_context = None
+        _scene = Scene()
+
+        def get_scene(self, scene_id):
+            return self._scene if scene_id == self._scene.scene_id else None
+
+        @staticmethod
+        def get_asset(_asset_id):
+            return None
+
+    notes = []
+    monkeypatch.setattr(editor_node, "_note_run_feedback",
+                        lambda method, prompt, unique_id, *args: notes.append((method, args)))
+    monkeypatch.setattr(editor_node, "load_project", lambda _project_dir: Project())
+    monkeypatch.setattr(editor_node.SonderEditor, "_render_scene_frames",
+        lambda self, proj, scene, start, end, **_kwargs:
+            torch.zeros(max(1, end - start), 2, 2, 3))
+    monkeypatch.setattr(editor_node.SonderEditor, "_load_scene_audio",
+        lambda self, proj, scene, start, end, **_kwargs: editor_node._make_silent_audio(1.0))
+    graph = _prompt_graph({
+        "editor": _prompt_node("SonderEditor"),
+        "consumer": _prompt_node("Consumer", {
+            "input": ["editor", 1 if demand in {"frames", "bridge"} else 5],
+        }),
+        # Only the Prompt Relay Bridge uses the prompt: it reads the project.
+        **({"bridge": _prompt_node("SonderPromptRelayBridge", {"project": ["editor", 0]})}
+           if demand == "bridge" else {}),
+    })
+    queued_kwargs = {}
+    if demand == "queued":
+        # A job frozen with the omission: its run warns from the frozen compile.
+        from server.timeline_state import GenerationJob
+        job = GenerationJob(job_id="job-1", scene_id="scene-1", status="pending",
+                            selection_start=0, selection_end=8, prompt="frozen text",
+                            params={"snapshot_version": 1},
+                            compiled_prompt_context={"warnings": [removed]})
+        monkeypatch.setattr(editor_node.SonderEditor, "_peek_queue_job",
+                            staticmethod(lambda proj: job))
+        queued_kwargs = {"render_queue_active": True}
+    result = editor_node.SonderEditor().execute(
+        project="Existing Project", project_name="Ignored", fps=24.0, width=4, height=4,
+        scene_id="scene-1", selection_start=0, selection_end=8, prompt=graph,
+        unique_id="editor", **queued_kwargs)
+    removed_notes = [args for method, args in notes if method == "note_reference_sources_removed"]
+    if demand == "queued":
+        assert result[5] == "frozen text"
+        assert removed_notes == [("Scene 1", [removed])]
+    elif demand in {"prompt", "bridge"}:
+        assert result[5] == "text without the chip"
+        assert removed_notes == [("Scene 1", [removed])]
+    else:
+        assert removed_notes == []
+
+
 @pytest.mark.parametrize("demand", ["prompt", "frames", "unknown"])
 def test_live_prompt_blockers_follow_output_demand_gate(
     tmp_path, monkeypatch, caplog, demand
@@ -192,7 +277,7 @@ def test_live_prompt_blockers_follow_output_demand_gate(
         @staticmethod
         def compile_for_execution(*_args, **_kwargs):
             return {"prompt": "legacy fail-open text", "errors": [{
-                "code": "broken_reference_source", "message": "Rebind it.",
+                "code": "unsupported_attachment_kind", "message": "Rebind it.",
             }]}
 
     class BlockingProject:
@@ -231,7 +316,7 @@ def test_live_prompt_blockers_follow_output_demand_gate(
                   unique_id=None if demand == "unknown" else "editor")
 
     if demand == "prompt":
-        with pytest.raises(RuntimeError, match="broken_reference_source"):
+        with pytest.raises(RuntimeError, match="unsupported_attachment_kind"):
             editor_node.SonderEditor().execute(**kwargs)
         return
     caplog.set_level("WARNING", logger="sonder_editor")

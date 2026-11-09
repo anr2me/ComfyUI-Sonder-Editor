@@ -111,7 +111,7 @@ def test_dormant_preserves_errors_to_empty_contract(tmp_path, monkeypatch):
         return {
             "prompt": "must not escape",
             "warnings": [],
-            "errors": [{"code": "broken_reference_source"}],
+            "errors": [{"code": "unsupported_attachment_kind"}],
         }
 
     monkeypatch.setattr(Scene, "compile_for_execution", blocked)
@@ -119,4 +119,4 @@ def test_dormant_preserves_errors_to_empty_contract(tmp_path, monkeypatch):
     active = summary["active_scene"]
     assert active["preview_prompt"] == ""
     assert active["preview_prompt_degraded"] is True
-    assert active["preview_prompt_error_code"] == "broken_reference_source"
+    assert active["preview_prompt_error_code"] == "unsupported_attachment_kind"

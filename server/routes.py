@@ -4452,8 +4452,9 @@ def _apply_create_prompt_identity_with_sources(
 
     A preview overlay passes `validate_sources=False`: a pending Writing create
     may cite a member deleted since it was drafted, and the compile's own
-    `broken_reference_source` names that on the chip instead of the whole
-    preview failing. Apply always validates.
+    `reference_source_removed` warning names that on the chip (the deleted
+    source is left out) instead of the whole preview failing. Apply always
+    validates.
     """
     raw = op.get("unit") if isinstance(op.get("unit"), dict) else {}
     unit_id = str(raw.get("semantic_unit_id") or "").strip()

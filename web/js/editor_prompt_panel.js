@@ -99,7 +99,42 @@ import {
     promptCandidateVisuallyStale,
     promptContextDiagnosticTitle,
     promptCapabilityDiagnostics,
+    REFERENCE_SOURCE_REMOVED,
 } from "./prompt_context_diagnostics.js";
+
+/** The visible "Source removed" mark on a chip whose Reference sources were
+ *  removed (Phase 3b), placed after the chip's label. Derived from this
+ *  compile's diagnostics on every repaint, never stored: rebinding the chip
+ *  clears it on the next compile. "Source removed" when the whole chip is
+ *  left out, "N source(s) removed" when only part of it is. */
+export function paintSourceRemovedMark(chip, rows) {
+    const removed = (Array.isArray(rows) ? rows : [])
+        .filter((row) => row?.code === REFERENCE_SOURCE_REMOVED);
+    if (!chip || !removed.length) return null;
+    // Chips only: a compiled projection pill shares the attachment id but is
+    // output, not the chip to repair.
+    if (chip.dataset.sonderPromptProjection) return null;
+    const whole = removed.some((row) => row.omitted === "chip");
+    chip.dataset.sonderSourceRemoved = whole ? "chip" : "partial";
+    // A Writing-mode handle reads as prose: visible text there would land
+    // mid-sentence, so it keeps the flag and the warning in its title only. A
+    // handle keeps its edit glyph in a floating holder; a pill holds it itself.
+    const glyph = chip.querySelector("[data-sonder-chip-edit-affordance]");
+    if (glyph && glyph.parentElement !== chip) return null;
+    const count = removed.reduce((total, row) =>
+        total + (Array.isArray(row.removed) ? row.removed.length : 0), 0) || 1;
+    const mark = document.createElement("span");
+    mark.dataset.sonderSourceRemovedMark = "1";
+    mark.setAttribute("aria-hidden", "true");
+    mark.textContent = whole ? "Source removed"
+        : `${count} source${count === 1 ? "" : "s"} removed`;
+    mark.style.cssText = `flex:0 0 auto;margin-left:4px;font-size:9px;`
+        + `font-weight:600;color:${COLORS.warningText};white-space:nowrap;`;
+    const label = chip.querySelector("[data-sonder-context-chip-label]");
+    if (label?.parentNode) label.parentNode.insertBefore(mark, label.nextSibling);
+    else chip.appendChild(mark);
+    return mark;
+}
 
 const WRITING_BREAK = "---";
 const WRITING_DRAFT_TEXT_CAP = 20000;
@@ -1819,6 +1854,8 @@ Server value: ${serverValue}` : ""}`;
             chip.style.boxShadow = "";
             chip.removeAttribute("aria-invalid");
             delete chip.dataset.sonderDiagnosticTier;
+            delete chip.dataset.sonderSourceRemoved;
+            chip.querySelector("[data-sonder-source-removed-mark]")?.remove();
             const rows = promptCapabilityDiagnostics(
                 state.byAttachment[chip.dataset.attachmentId] || [],
                 chip.dataset.channelKey || chip.closest("[data-sonder-prompt-channel]")
@@ -1832,6 +1869,7 @@ Server value: ${serverValue}` : ""}`;
             chip.style.boxShadow = `inset 0 0 0 1px ${hasError ? COLORS.dangerText : COLORS.warningText}`;
             if (hasError) chip.setAttribute("aria-invalid", "true");
             chip.title = `${chip.title}\n\n${promptContextDiagnosticTitle(rows)}`;
+            paintSourceRemovedMark(chip, rows);
         }
         refreshWritingCompiled(payload);
     };

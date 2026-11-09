@@ -10,6 +10,8 @@ id and kept only while ``sdk_runs`` keeps the bound run (pruned with
 - the latest native count of the running node (``sdk_progress`` listener);
 - when the run was queued and started;
 - the window and the queued job the Editor noted before it rendered;
+- the chips its prompt left out because their Reference sources were removed
+  (``note_reference_sources_removed``: locations and counts, never messages);
 - the Modes rows captured at submission by each host's own Controls authority;
 - the terminal record from the run's release, kept for late joiners until prune.
 
@@ -81,6 +83,7 @@ def _new(prompt_id: str) -> dict[str, Any]:
         "state": "queued", "queued_at": now, "started_at": 0.0,
         "stage": "", "stage_node": "", "node": "", "display": "", "count": None,
         "queued_receipt": [], "windows": {}, "jobs": {}, "modes": None,
+        "removed_sources": {},
         "aliases": [], "terminal": None, "terminal_sent": False,
         "last_sent": 0.0, "trailing": False,
     }
@@ -253,6 +256,38 @@ def note_job(prompt: Any, node_id: Any, job: Any, mode: str) -> None:
         if data is None:
             return
         data["jobs"][str(node_id or "")] = entry
+        data["receipt_rev"] += 1
+    _publish(prompt_id, force=True)
+
+
+REMOVED_SOURCE_CODE = "reference_source_removed"
+MAX_REMOVED_SOURCE_CHIPS = 16
+
+
+def note_reference_sources_removed(prompt: Any, node_id: Any, scene_name: Any, warnings: Any) -> None:
+    """Chips this run's prompt left out because their Reference sources were
+    removed (Phase 3b), read from the compile the Editor ran or froze.
+
+    Bounded and message-free: a location and how much was left out per chip,
+    at most ``MAX_REMOVED_SOURCE_CHIPS`` of them plus the total. Nothing is
+    noted when no chip lost a source, so the receipt carries no empty row.
+    """
+    prompt_id = _prompt_id_for(prompt)
+    if not prompt_id or not isinstance(warnings, list):
+        return
+    chips = [{"location": str(row.get("location") or ""),
+              "omitted": "chip" if row.get("omitted") == "chip" else "partial"}
+             for row in warnings
+             if isinstance(row, dict) and row.get("code") == REMOVED_SOURCE_CODE]
+    if not chips:
+        return
+    entry = {"scene_name": str(scene_name or ""), "count": len(chips),
+             "chips": chips[:MAX_REMOVED_SOURCE_CHIPS]}
+    with _LOCK:
+        data = _DATA.get(prompt_id)
+        if data is None:
+            return
+        data["removed_sources"][str(node_id or "")] = entry
         data["receipt_rev"] += 1
     _publish(prompt_id, force=True)
 
@@ -528,6 +563,9 @@ def _receipt(data: dict) -> dict:
         "windows": [dict(value, editor=key) for key, value in data["windows"].items()],
         "jobs": [dict(value, editor=key) for key, value in data["jobs"].items()],
         "modes": [dict(row) for row in data["modes"]] if isinstance(data["modes"], list) else None,
+        "reference_sources_removed": [
+            dict(value, chips=[dict(chip) for chip in value["chips"]], editor=key)
+            for key, value in data["removed_sources"].items()],
     }
 
 

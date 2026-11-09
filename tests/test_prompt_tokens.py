@@ -305,6 +305,17 @@ def _shot(attachment_id):
     })
 
 
+def _catalog_context(catalog):
+    """`_reference_context`, optionally with a Library catalog as every live
+    compile has one. With a catalog the compiler can rule an id removed
+    (Phase 3b); a `@shot` id is never a Library source, so it must not be."""
+    context = _reference_context()
+    if catalog:
+        context["references"] = [{"reference_id": "woman", "members": [
+            {"member_id": "portrait", "asset_id": "a1"}]}]
+    return context
+
+
 def _shot_section(prompt_id, start, end, attachments, text="body"):
     return {
         "prompt_id": prompt_id, "start_frame": start, "end_frame": end,
@@ -314,7 +325,8 @@ def _shot_section(prompt_id, start, end, attachments, text="body"):
     }
 
 
-def test_shot_token_resolves_against_the_marker_counter():
+@pytest.mark.parametrize("catalog", [False, True])
+def test_shot_token_resolves_against_the_marker_counter(catalog):
     """PR-20. `[Shot N]` is compiler-owned numbering with no authored spelling,
     so a definition naming its shot had to hard-code a number that went stale as
     soon as a Shot was added earlier. The citation must track the same counter
@@ -328,7 +340,7 @@ def test_shot_token_resolves_against_the_marker_counter():
             _shot_section("second", 12, 24, [_shot("shot-b"), summary]),
         ],
         window_start=0, window_end=24, fps=24, template="minimax_h3_ref",
-        context=_reference_context())
+        context=_catalog_context(catalog))
     assert not [value for value in compiled["errors"]
                 if value["code"] == "unresolved_prompt_token"]
     assert "The frame opens [Shot 2]" in compiled["prompt"]
@@ -336,7 +348,8 @@ def test_shot_token_resolves_against_the_marker_counter():
     assert summary["config"]["overrides"]["summary"] == "The frame opens @shot(shot-b)"
 
 
-def test_shot_token_renumbers_when_an_earlier_shot_appears():
+@pytest.mark.parametrize("catalog", [False, True])
+def test_shot_token_renumbers_when_an_earlier_shot_appears(catalog):
     """The staleness PR-20 describes: the same authored citation must compile to
     a different ordinal once a shot opens ahead of it, with no edit to the prose."""
     summary = _reference_attachment(
@@ -344,17 +357,18 @@ def test_shot_token_renumbers_when_an_earlier_shot_appears():
     later = _shot_section("second", 12, 24, [_shot("shot-b"), summary])
     without_earlier = prompt_context.compile_prompt_context(
         global_channels={}, sections=[later], window_start=0, window_end=24,
-        fps=24, template="minimax_h3_ref", context=_reference_context())
+        fps=24, template="minimax_h3_ref", context=_catalog_context(catalog))
     with_earlier = prompt_context.compile_prompt_context(
         global_channels={},
         sections=[_shot_section("first", 0, 12, [_shot("shot-a")]), later],
         window_start=0, window_end=24, fps=24, template="minimax_h3_ref",
-        context=_reference_context())
+        context=_catalog_context(catalog))
     assert "Matches [Shot 1]" in without_earlier["prompt"]
     assert "Matches [Shot 2]" in with_earlier["prompt"]
 
 
-def test_shot_token_for_a_shot_outside_the_window_blocks():
+@pytest.mark.parametrize("catalog", [False, True])
+def test_shot_token_for_a_shot_outside_the_window_blocks(catalog):
     """A shot with no ordinal in the selected window is a dangling binding, not
     a silent zero — the same contract every other prompt token follows."""
     summary = _reference_attachment(
@@ -363,7 +377,7 @@ def test_shot_token_for_a_shot_outside_the_window_blocks():
         global_channels={},
         sections=[_shot_section("only", 0, 24, [_shot("shot-a"), summary])],
         window_start=0, window_end=24, fps=24, template="minimax_h3_ref",
-        context=_reference_context())
+        context=_catalog_context(catalog))
     diagnostic = next(value for value in compiled["errors"]
                       if value["code"] == "unresolved_prompt_token")
     assert diagnostic["prompt_token_id"] == "shot-missing"

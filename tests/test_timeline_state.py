@@ -924,7 +924,7 @@ def test_live_prompt_path_returns_text_for_warnings_but_not_integrity_errors(mon
     monkeypatch.setattr(Scene, "compile_prompt_context", lambda self, *args, **kwargs: {
         "prompt": "must not escape",
         "warnings": [],
-        "errors": [{"code": "broken_reference_source"}],
+        "errors": [{"code": "unsupported_attachment_kind"}],
     })
     assert scene.get_prompt_for_range(0, 24) == ""
 

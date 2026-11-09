@@ -220,6 +220,29 @@ def test_window_job_and_claimed_job_are_named_before_the_render(clean):
     assert "receipt" not in records(clean)[-1]
 
 
+def test_removed_reference_sources_reach_the_receipt_bounded_and_message_free(clean):
+    """Phase 3b: chips a run's prompt left out because their Reference sources
+    were removed travel in the receipt as locations and a count, never messages."""
+    prompt = bind()
+    start("p1", prompt)
+    run_feedback.note_reference_sources_removed(prompt, "1", "Saloon", [
+        {"code": "missing_h3_reference_field", "message": "not this"}])
+    assert "reference_sources_removed" not in json.dumps(
+        [r.get("receipt", {}).get("reference_sources_removed") or "" for r in records(clean)])
+    rows = [{"code": "reference_source_removed", "attachment_id": f"a{index}", "origin": "global",
+             "location": f"Section {index}", "omitted": "chip" if index == 0 else "partial",
+             "removed": [{"kind": "picture", "id": "m"}], "message": "long text"}
+            for index in range(run_feedback.MAX_REMOVED_SOURCE_CHIPS + 4)]
+    run_feedback.note_reference_sources_removed(prompt, "1", "Saloon", rows)
+    receipt = records(clean)[-1]["receipt"]
+    [entry] = receipt["reference_sources_removed"]
+    assert entry["editor"] == "1" and entry["scene_name"] == "Saloon"
+    assert entry["count"] == run_feedback.MAX_REMOVED_SOURCE_CHIPS + 4
+    assert len(entry["chips"]) == run_feedback.MAX_REMOVED_SOURCE_CHIPS
+    assert entry["chips"][0] == {"location": "Section 0", "omitted": "chip"}
+    assert "long text" not in json.dumps(receipt)
+
+
 def test_an_unobserved_prompt_ignores_notes():
     prompt = editor_prompt()
     run_feedback.note_stage(prompt, "1", "rendering")

@@ -304,7 +304,10 @@ def test_same_id_section_capability_limit_does_not_poison_global_dormancy():
     assert global_projection["state"] == "dormant"
 
 
-def test_broken_global_identity_blocks_without_a_dormancy_warning():
+def test_global_identity_blockers_win_without_a_dormancy_warning():
+    # An identity whose member was deleted no longer blocks (Phase 3b): the
+    # member is pruned, the identity reads as assetless and still emits its
+    # authored prose, and the chip warns that a source was removed.
     broken_unit = {
         "semantic_unit_id": "broken", "name": "Broken", "kind": "subject",
         "definition": "a broken subject",
@@ -318,15 +321,19 @@ def test_broken_global_identity_blocks_without_a_dormancy_warning():
     compiled = _identity_dormancy_fixture(
         global_chip=chip, units=[broken_unit], catalog_members=[])
 
-    assert any(row["code"] == "broken_reference_source"
-               for row in compiled["errors"])
+    assert not compiled["errors"]
     assert not any(row["code"] == "reference_source_dormant"
                    for row in compiled["warnings"])
+    removed = [row for row in compiled["warnings"]
+               if row["code"] == "reference_source_removed"]
+    assert [row["omitted"] for row in removed] == ["partial"]
+    assert removed[0]["removed"] == [{"kind": "member", "id": "deleted-member"}]
     assert "BROKEN AUTHORED TEXT" in compiled["prompt"]
 
+    # Unstaged but existing, so unresolved rather than removed: still blocks.
     token_chip = _reference_chip(
         "token-chip", {"semantic_unit_ids": ["dormant"]},
-        {"text": "@subject(missing)"}, capabilities=("mentions",))
+        {"text": "@subject(dormant)"}, capabilities=("mentions",))
     compiled = _identity_dormancy_fixture(global_chip=token_chip)
     token_errors = [row for row in compiled["errors"]
                     if row["code"] == "unresolved_prompt_token"]
@@ -632,20 +639,21 @@ def test_dormant_global_chip_claims_no_shots_but_live_chip_still_does(
     assert captured["physical-shots"]["groups"]["physical-group"] == [1, 2, 3]
     assert captured["physical-shots"]["units"]["dormant"] == [1, 2, 3]
 
-    broken_unit = {
-        "semantic_unit_id": "broken", "name": "Broken", "kind": "subject",
-        "definition": "the broken subject",
-        "sources": [{"entity_id": "entity", "member_id": "deleted-member"}],
-    }
-    blocked = _reference_chip(
-        "blocked-shots", {"semantic_unit_ids": ["broken"]},
-        {"summary": "Blocked summary"}, capabilities=("summary",),
-        group="blocked-group")
-    compiled = compile_three_shots(blocked, units=[broken_unit])
-    assert any(row["code"] == "broken_reference_source"
-               for row in compiled["errors"])
-    assert "blocked-group" not in captured["blocked-shots"]["groups"]
-    assert "broken" not in captured["blocked-shots"]["units"]
+    # A chip whose every source was deleted is left out whole (Phase 3b) and,
+    # like a disabled chip, claims no shots. It used to block instead.
+    removed = _reference_chip(
+        "removed-shots", {"picture_ids": ["deleted-member"]},
+        {"summary": "Removed summary"}, capabilities=("summary",),
+        group="removed-group")
+    live_beside = _reference_chip(
+        "live-beside-shots", {"semantic_unit_ids": ["staged"]},
+        {"summary": "Live beside"}, capabilities=("summary",),
+        group="live-beside-group")
+    compiled = compile_three_shots(removed, middle_chip=live_beside)
+    assert not compiled["errors"]
+    assert "removed-shots" not in captured
+    assert "removed-group" not in captured["live-beside-shots"]["groups"]
+    assert "Removed summary" not in compiled["prompt"]
 
 
 def test_duplicate_global_ids_keep_blockers_attached_to_rendered_chip():
@@ -655,13 +663,16 @@ def test_duplicate_global_ids_keep_blockers_attached_to_rendered_chip():
     broken = _reference_chip(
         "same", {"semantic_unit_ids": ["broken"]},
         {"text": "BROKEN DUPLICATE TEXT"}, capabilities=("mentions",))
+    # A deleted member used to be the blocker here; since Phase 3b it is left
+    # out, so an unsupported identity kind stands in. The subject is how the
+    # blocker follows the re-minted id, not which blocker it is.
     units = [
         {"semantic_unit_id": "staged", "name": "Staged", "kind": "subject",
          "definition": "staged",
          "sources": [{"entity_id": "entity", "member_id": "staged-member"}]},
-        {"semantic_unit_id": "broken", "name": "Broken", "kind": "subject",
+        {"semantic_unit_id": "broken", "name": "Broken", "kind": "made_up_kind",
          "definition": "broken",
-         "sources": [{"entity_id": "entity", "member_id": "deleted-member"}]},
+         "sources": [{"entity_id": "entity", "member_id": "staged-member"}]},
     ]
     compiled = _identity_dormancy_fixture(
         global_chips=[valid, broken], units=units,
@@ -669,7 +680,7 @@ def test_duplicate_global_ids_keep_blockers_attached_to_rendered_chip():
             member_id="staged-member", asset_id="img_a")])
 
     broken_error = next(row for row in compiled["errors"]
-                        if row["code"] == "broken_reference_source")
+                        if row["code"] == "unsupported_identity_kind")
     rendered_id = broken_error["attachment_id"]
     assert rendered_id != "same"
     assert "BROKEN DUPLICATE TEXT" in compiled["prompt"]

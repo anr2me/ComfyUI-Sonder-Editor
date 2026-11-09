@@ -11,6 +11,7 @@
 // DOM; the notification Core and its presenters do.
 
 import { ambiguityText } from "./controls_modes_model.js";
+import { removedReferenceSourcesMessage } from "./prompt_context_diagnostics.js";
 import { formatQueueTime, queueChunkLabel } from "./queue_format.js";
 
 export const UNCONFIRMED_END = "The run ended, but Sonder could not confirm how.";
@@ -230,6 +231,7 @@ export function createRunFeedbackDriver({
             const keys = [...records.keys()];
             const done = keys.find((key) => !appMode && (!items.has(key) || items.get(key).ended)) || keys[0];
             records.delete(done);
+            warnedRemoved.delete(done);
             if (!appMode && items.get(done)?.ended) items.delete(done);
         }
         return entry;
@@ -298,6 +300,7 @@ export function createRunFeedbackDriver({
             if (destroyed) return;
         }
         item.ended = true;
+        item.endedHere = true;
         const outcome = item.forcedOutcome || outcomeFor(recordOf(item), appMode ? item.app : null);
         const others = [...items.values()].some((other) => other !== item && unfinished(other));
         if (live && live.key === item.key && !others && live.handle.alive()) {
@@ -324,8 +327,40 @@ export function createRunFeedbackDriver({
         }
     }
 
+    // Prompt ids whose removed-source warning this page has shown. The promise
+    // is once per page per run: a reload during a live run may warn again.
+    const warnedRemoved = new Set();
+
+    // A run whose prompt left out chips with removed Reference sources (Phase
+    // 3b) warns once. Only this page's own runs: items are host runs this page
+    // followed, or the App's runs joined to this session, never another
+    // session's records that `keep` also holds, and never a run a quiet read
+    // found already ended.
+    function warnRemovedSources() {
+        for (const item of items.values()) {
+            if (!item.endedHere && !unfinished(item)) continue;
+            if (!appMode && !item.shownLive && !item.endedHere) continue;
+            const record = recordOf(item);
+            const pid = String(record?.prompt_id || "");
+            if (!pid || warnedRemoved.has(pid)) continue;
+            const rows = arr(record?.receipt?.reference_sources_removed);
+            if (!rows.length) continue;
+            warnedRemoved.add(pid);
+            const count = rows.reduce((total, row) => total + (num(row?.count) || 0), 0);
+            const locations = rows.flatMap((row) => arr(row?.chips).map((chip) => chip?.location));
+            const scenes = [...new Set(rows.map((row) => String(row?.scene_name || "")).filter(Boolean))];
+            notify({
+                tier: "warning",
+                message: removedReferenceSourcesMessage(count, locations),
+                detail: scenes.length ? scenes.join(", ") : null,
+                source: `reference-source-removed:${page}`,
+            });
+        }
+    }
+
     function render() {
         if (destroyed) return;
+        warnRemovedSources();
         const open = [...items.values()].filter(unfinished);
         const running = open.filter(isRunning).sort((a, b) => (startedAtOf(a) || 0) - (startedAtOf(b) || 0) || order(a) - order(b));
         const waitingItems = open.filter((item) => !isRunning(item)).sort((a, b) => order(a) - order(b));

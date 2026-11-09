@@ -147,8 +147,9 @@ def test_a_server_without_the_operation_refuses_it_rather_than_dropping_sources(
 
 def test_the_preview_names_a_source_deleted_since_the_draft_on_its_chip(monkeypatch, tmp_path):
     """A pending Writing create may cite a member deleted after it was drafted.
-    The preview still compiles and says so on the chip (the compile's own
-    blocking `broken_reference_source`); Apply refuses it, naming the Subject."""
+    The preview still compiles and says so on the chip: the deleted source is
+    left out with a `reference_source_removed` warning (Phase 3b; it used to
+    block). Apply still refuses the create, naming the Subject."""
     route_module = _load_route_module(monkeypatch)
     project = _h3_project(tmp_path)
     scene = project.get_scene("scene")
@@ -158,8 +159,10 @@ def test_the_preview_names_a_source_deleted_since_the_draft_on_its_chip(monkeypa
     stale = _create(sources=(("cast", "m_img"), ("cast", "deleted-member")))
     status, payload = _compile(route_module, project, prompt_semantic_unit_creates=[stale])
     assert status == 200, payload
-    broken = [row for row in payload["errors"] if row["code"] == "broken_reference_source"]
-    assert broken and broken[0]["attachment_id"] == "new-chip"
+    assert not [row for row in payload["errors"] if row.get("attachment_id") == "new-chip"]
+    removed = [row for row in payload["warnings"] if row["code"] == "reference_source_removed"]
+    assert removed and removed[0]["attachment_id"] == "new-chip"
+    assert {"kind": "member", "id": "deleted-member"} in removed[0]["removed"]
     assert project.prompt_semantic_units == [], "a preview never writes"
 
     saves = []

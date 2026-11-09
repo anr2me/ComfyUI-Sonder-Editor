@@ -24,6 +24,14 @@ export function buildPromptContextDiagnostics(payload) {
                 semantic_unit_id: String(raw?.semantic_unit_id || ""),
                 field: String(raw?.field || ""),
             };
+            // The chip's Source removed mark reads whether the whole chip or
+            // only part of it was left out, and how many sources were removed.
+            if (diagnostic.code === REFERENCE_SOURCE_REMOVED) {
+                diagnostic.omitted = raw?.omitted === "chip" ? "chip" : "partial";
+                diagnostic.removed = Array.isArray(raw?.removed)
+                    ? raw.removed.map((row) => ({ kind: String(row?.kind || ""), id: String(row?.id || "") }))
+                    : [];
+            }
             if (Array.isArray(raw?.attachments) && raw.attachments.length) {
                 for (const owner of raw.attachments) {
                     const id = String(owner?.attachment_id || "");
@@ -94,4 +102,37 @@ export function resolvePromptCandidateSelection(start, end, duration) {
         return { selectionStart, selectionEnd };
     }
     return { selectionStart: 0, selectionEnd: sceneEnd };
+}
+
+export const REFERENCE_SOURCE_REMOVED = "reference_source_removed";
+
+/**
+ * One sentence for chips a run or an enqueue left out because their Reference
+ * sources were removed (Phase 3b). Shared by the enqueue toast and the run
+ * notice so both say the same thing. ``locations`` are the compiler's
+ * "Global" / "Section N" strings, de-duplicated by the caller.
+ */
+export function removedReferenceSourcesMessage(count, locations = []) {
+    const total = Math.max(0, Number(count) || 0);
+    if (!total) return "";
+    const places = [...new Set((Array.isArray(locations) ? locations : [])
+        .map((value) => String(value || "")).filter(Boolean))];
+    const where = places.length ? ` (${places.join(", ")})` : "";
+    return total === 1
+        ? `1 chip${where} names a Reference source that was removed, so that part is left out of the prompt. The chip is marked Source removed.`
+        : `${total} chips${where} name Reference sources that were removed, so those parts are left out of the prompt. The chips are marked Source removed.`;
+}
+
+/** The removed-source warnings of compiled jobs, one per chip across them. */
+export function removedReferenceSourceChips(jobs) {
+    const chips = new Map();
+    for (const job of Array.isArray(jobs) ? jobs : [jobs]) {
+        const warnings = job?.compiled_prompt_context?.warnings;
+        for (const row of Array.isArray(warnings) ? warnings : []) {
+            if (row?.code !== REFERENCE_SOURCE_REMOVED) continue;
+            const key = `${job?.scene_id || ""}|${row.origin || ""}|${row.attachment_id || ""}`;
+            if (!chips.has(key)) chips.set(key, row);
+        }
+    }
+    return [...chips.values()];
 }

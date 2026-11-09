@@ -115,10 +115,27 @@ def test_bridge_live_reference_formatting_matches_shared_execution_compile():
 
 def test_bridge_live_refuses_blocking_prompt_context_diagnostics():
     prompt_bridge = _import_prompt_bridge()
+    # A retired Guide chip still blocks while enabled. (A deleted Reference
+    # source used to stand in here; since Phase 3b it is left out instead.)
+    attachment = {"attachment_id": "legacy-guide", "kind": "guide"}
+    project, _scene = _project_with_scene(
+        prompt_sections=[PromptSection(
+            0, 24, channels={"visual": "walks"}, attachments=[attachment])])
+    project._execution_context = {
+        "scene_id": "scene-1", "context_start": 0, "context_end": 24,
+    }
+
+    with pytest.raises(RuntimeError, match="unsupported_attachment_kind"):
+        prompt_bridge.build_window_relay_payload(project)
+
+
+def test_bridge_live_leaves_out_a_deleted_reference_item_and_runs():
+    prompt_bridge = _import_prompt_bridge()
     attachment = {
-        "attachment_id": "broken-reference-item",
+        "attachment_id": "deleted-reference-item",
         "kind": "reference",
         "source": {"reference_item_id": "missing-item"},
+        "config": {"text": "DELETED ITEM TEXT"},
     }
     project, _scene = _project_with_scene(
         prompt_sections=[PromptSection(
@@ -127,8 +144,9 @@ def test_bridge_live_refuses_blocking_prompt_context_diagnostics():
         "scene_id": "scene-1", "context_start": 0, "context_end": 24,
     }
 
-    with pytest.raises(RuntimeError, match="broken_reference_source"):
-        prompt_bridge.build_window_relay_payload(project)
+    payload = prompt_bridge.build_window_relay_payload(project)
+    assert "walks" in payload["smart_prompt"]
+    assert "DELETED ITEM TEXT" not in payload["smart_prompt"]
 
 
 def test_bridge_window_fallback_without_editor_ctx():

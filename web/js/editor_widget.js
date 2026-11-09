@@ -465,7 +465,11 @@ import {
     setPromptAttachmentCapabilityEnabled,
     PROMPT_CONTEXT_FORMAT,
 } from "./prompt_context_chips.js";
-import { resolvePromptCandidateSelection } from "./prompt_context_diagnostics.js";
+import {
+    removedReferenceSourceChips,
+    removedReferenceSourcesMessage,
+    resolvePromptCandidateSelection,
+} from "./prompt_context_diagnostics.js";
 import { resolvedPromptProfile } from "./prompt_profile_declarations.js";
 import { openContextMenu } from "./editor_context_menu.js";
 import { mountChannelTemplateEditor } from "./editor_channel_template_editor.js";
@@ -19321,6 +19325,7 @@ export class EditorWidget {
             });
             const payload = result?.payload || {};
             const createdJobs = Array.isArray(payload?.jobs) ? payload.jobs : [];
+            this._warnForRemovedReferenceSources(createdJobs);
             this._renderQueue = (this._renderQueue || []).map((job) => {
                 if (!tempIds.has(job.job_id)) return job;
                 const tempIndex = tempJobs.findIndex((temp) => temp.job_id === job.job_id);
@@ -23783,6 +23788,17 @@ export class EditorWidget {
         notifyWarning(message, { source: "guide-collision-predicted" });
     }
 
+    /** One warning per enqueue for chips its jobs left out because their
+     *  Reference sources were removed, read from each job's frozen compile.
+     *  The enqueue went ahead; this only says what the prompt lacks. */
+    _warnForRemovedReferenceSources(jobs) {
+        const chips = removedReferenceSourceChips(jobs);
+        if (!chips.length) return;
+        notifyWarning(
+            removedReferenceSourcesMessage(chips.length, chips.map((row) => row.location)),
+            { source: "reference-source-removed" });
+    }
+
     _projectFolderName(project) {
         return String(project?.path || "").split(/[/\\]/).pop() || "";
     }
@@ -25953,6 +25969,7 @@ export class EditorWidget {
             const createdJob = result?.payload;
             if (createdJob?.job_id) {
                 this._warnForGuideCollisionPredictions(createdJob);
+                this._warnForRemovedReferenceSources(createdJob);
                 this._renderQueue = (this._renderQueue || []).map((job) => job.job_id === tempId ? createdJob : job);
                 this._flashQueueButton(this._queueBtn);
                 this._applyStoredQueueBatchCollapseState();
@@ -26064,6 +26081,7 @@ export class EditorWidget {
             const payload = result?.payload || {};
             const createdJobs = Array.isArray(payload?.jobs) ? payload.jobs : [];
             this._warnForGuideCollisionPredictions(createdJobs);
+            this._warnForRemovedReferenceSources(createdJobs);
             this._renderQueue = (this._renderQueue || []).map((job) => {
                 if (!tempIds.has(job.job_id)) return job;
                 const tempIndex = tempJobs.findIndex((temp) => temp.job_id === job.job_id);

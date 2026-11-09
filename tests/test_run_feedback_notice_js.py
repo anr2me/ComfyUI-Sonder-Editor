@@ -274,6 +274,51 @@ assert.equal(list.length, 0);
 console.log('ok');
 '''
 
+REMOVED_SOURCES = r'''
+// Phase 3b: a run whose prompt left out chips with removed Reference sources
+// warns once per run, from this page's own runs only.
+const removedRows = [{editor: '1', scene_name: 'Saloon', count: 2,
+    chips: [{location: 'Global', omitted: 'chip'}, {location: 'Section 3', omitted: 'partial'}]}];
+const withRemoved = {...RECEIPT, reference_sources_removed: removedRows};
+const warnings = () => list.filter(n => n.tier === 'warning' && n.source === 'reference-source-removed:p');
+const d = driver();
+d.applyRecord(rec('a', 1, 'queued', {receipt: RECEIPT}));
+assert.equal(warnings().length, 0, 'no removed sources, no warning');
+d.applyRecord(rec('a', 2, 'running', {elapsed_ms: 10, receipt: withRemoved}));
+assert.equal(warnings().length, 1);
+assert.match(warnings()[0].message, /^2 chips \(Global, Section 3\) name Reference sources that were removed/);
+assert.equal(warnings()[0].detail, 'Saloon');
+// Later records for the same run never warn again, the receipt kept or resent.
+d.applyRecord(rec('a', 3, 'running', {elapsed_ms: 20}));
+d.applyRecord(rec('a', 4, 'running', {elapsed_ms: 30, receipt: withRemoved}));
+d.applyRecord(rec('a', 5, 'completed', {terminal: {outcome: 'success', take_saved: true}, elapsed_ms: 40}));
+assert.equal(warnings().length, 1);
+assert.equal(warnings()[0].count || 1, 1, 'one notification, not a counted repeat');
+// Another host's run never warns here, even though the driver sees its record.
+d.applyRecord({...rec('b', 1, 'running', {elapsed_ms: 5, receipt: withRemoved}), host_ids: ['h2']});
+assert.equal(warnings().length, 1);
+// A read that finds a run already ended (a reload) does not replay its warning.
+reset();
+const r = driver();
+r.applyRead({ok: true, epoch: 'e1', records: [rec('c', 4, 'completed', {terminal: {outcome: 'success'}, elapsed_ms: 9, receipt: withRemoved})]});
+assert.equal(list.filter(n => n.tier === 'warning').length, 0);
+// The Sonder App: its own runs warn; another session's record held by the driver does not.
+reset();
+const a = driver({app: true, ownerMatch: () => true});
+a.applyAppRuns([{run_id: 'r1', state: 'running', prompt_id: 'p1', purpose: 'run'}], {primed: false});
+a.applyRecord({...rec('p1', 1, 'running', {elapsed_ms: 5, receipt: withRemoved}), host_ids: [], run_ids: ['r1']});
+a.applyRecord({...rec('p-other', 1, 'running', {elapsed_ms: 5, receipt: withRemoved}), host_ids: [], run_ids: ['other']});
+assert.equal(list.filter(n => n.tier === 'warning').length, 1);
+// One chip reads in the singular.
+reset();
+const s = driver();
+s.applyRecord(rec('s', 1, 'running', {elapsed_ms: 5, receipt: {...RECEIPT, reference_sources_removed: [
+    {editor: '1', scene_name: '', count: 1, chips: [{location: 'Section 1', omitted: 'partial'}]}]}}));
+assert.equal(list.find(n => n.tier === 'warning').message,
+    '1 chip (Section 1) names a Reference source that was removed, so that part is left out of the prompt. The chip is marked Source removed.');
+console.log('ok');
+'''
+
 COALESCE = r'''
 // D6: a coalescing slot is one source and one tier.
 for (const tier of ['info', 'warning', 'info', 'warning']) N.notify({tier, source: 's', message: tier});
@@ -303,6 +348,7 @@ def run(body, tmp_path, name):
 
 
 @pytest.mark.parametrize('name,body', [('model', MODEL), ('single', SINGLE), ('batch', BATCH), ('read', READ),
-                                       ('app', APP), ('coalesce', COALESCE)])
+                                       ('app', APP), ('coalesce', COALESCE),
+                                       ('removed_sources', REMOVED_SOURCES)])
 def test_run_notifications(tmp_path, name, body):
     run(body, tmp_path, name)

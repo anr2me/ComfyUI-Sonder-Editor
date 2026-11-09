@@ -109,15 +109,29 @@ def test_retention_warning_names_label_field_and_chip():
     assert not result["errors"]
 
 
-def test_missing_subject_binding_is_not_retargeted():
+@pytest.mark.parametrize("catalog", [False, True])
+def test_missing_subject_binding_is_not_retargeted(catalog):
+    context = {"setup_manifest": {"setup": {"mode": "reference"}},
+               "semantic_units": [{"semantic_unit_id": "new-identity", "name": "Old Reference",
+                                   "definition": "THE SAME-NAMED IDENTITY"}]}
+    if catalog:
+        context["references"] = []
     result = prompt_context.compile_prompt_context(
         sections=[{"prompt_id": "live", "start_frame": 0, "end_frame": 24,
                    "attachments": [{"attachment_id": "stale", "kind": "reference",
                                     "source": {"semantic_unit_ids": ["unit:old-reference"]}}]}],
-        context={"setup_manifest": {"setup": {"mode": "reference"}},
-                 "semantic_units": [{"semantic_unit_id": "new-identity", "name": "Old Reference"}]},
+        context=context,
         template="minimax_h3_ref", window_start=0, window_end=24, fps=24)
-    assert "broken_reference_source" in {row["code"] for row in result["errors"]}
+    if not catalog:
+        # A project-less compile has no deletion verdict: still the legacy blocker.
+        assert "broken_reference_source" in {row["code"] for row in result["errors"]}
+        return
+    # With a catalog the Subject is removed (Phase 3b): left out, never rebound.
+    assert not result["errors"]
+    removed = next(row for row in result["warnings"] if row["code"] == "reference_source_removed")
+    assert removed["removed"] == [{"kind": "subject", "id": "unit:old-reference"}]
+    assert removed["omitted"] == "chip"
+    assert "SAME-NAMED" not in result["prompt"] and "Old Reference" not in result["prompt"]
 
 
 def test_no_synthetic_subject_options():

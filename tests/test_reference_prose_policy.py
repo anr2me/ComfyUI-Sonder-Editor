@@ -167,16 +167,16 @@ def test_keep_surfaces_output_limit_and_drop_does_not(monkeypatch, scope):
 
 
 @pytest.mark.parametrize("scope", ["global_chip", "section_chip"])
-@pytest.mark.parametrize("fault", ["deleted", "token", "route", "declaration"])
+@pytest.mark.parametrize("fault", ["token", "route", "declaration"])
 def test_blockers_take_precedence_in_each_scope(monkeypatch, scope, fault):
+    # A deleted source is no longer a blocker (Phase 3b): it is left out, and
+    # test_reference_source_removed.py covers it. These still block.
     chip = _reference_chip("broken", {"semantic_unit_ids":["dormant"]},
                            {"text":"authored"}, capabilities=("mentions",))
     extra = {}
-    code = "broken_reference_source"
-    if fault == "deleted":
-        extra["catalog_members"] = []
-    elif fault == "token":
-        chip["config"]["overrides"]["text"] = "@subject(missing)"
+    if fault == "token":
+        # An existing but unstaged identity: unresolved, not removed.
+        chip["config"]["overrides"]["text"] = "@subject(dormant)"
         code = "unresolved_prompt_token"
     elif fault == "route":
         chip["capabilities"][0]["channel_key"] = "missing"
@@ -189,15 +189,19 @@ def test_blockers_take_precedence_in_each_scope(monkeypatch, scope, fault):
     assert "reference_source_dormant" not in _codes(result, "warnings")
 
 
-def test_deleted_physical_member_blocks_but_unstaged_member_warns():
+def test_deleted_physical_member_is_left_out_but_unstaged_member_warns():
     chip = _reference_chip("physical", {"picture_ids":["dormant-member"]},
-                           {"text":"prose"}, capabilities=("mentions",))
+                           {"text":"PROSE"}, capabilities=("mentions",))
     result = _identity_dormancy_fixture(section_chip=chip)
     assert not result["errors"]
     warning = next(row for row in result["warnings"] if row["code"] == "reference_source_dormant")
     assert "Cast" in warning["message"] and "dormant-member" not in warning["message"]
     result = _identity_dormancy_fixture(section_chip=chip, catalog_members=[])
-    assert "broken_reference_source" in _codes(result)
+    assert not result["errors"]
+    assert "reference_source_dormant" not in _codes(result, "warnings")
+    removed = next(row for row in result["warnings"] if row["code"] == "reference_source_removed")
+    assert removed["omitted"] == "chip" and removed["attachment_id"] == "physical"
+    assert "PROSE" not in result["prompt"]
 
 
 def _generic_project():
@@ -236,12 +240,15 @@ def test_generic_item_warns_for_each_staging_verdict(verdict):
     assert "CHIP TEXT" not in result["prompt"] and "WALK" in result["prompt"]
 
 
-def test_legacy_projectless_compose_and_deleted_item_refusal():
+def test_legacy_projectless_compose_and_deleted_item_left_out():
     _project, scene = _generic_project()
     assert "WALK" in scene.get_prompt_for_range(0, 100)
     scene.reference_items = []
-    assert scene.get_prompt_for_range(0, 100) == ""
-    assert "broken_reference_source" in _codes(scene.compile_prompt_context(0, 100))
+    prompt = scene.get_prompt_for_range(0, 100)
+    assert "WALK" in prompt and "CHIP TEXT" not in prompt
+    compiled = scene.compile_prompt_context(0, 100)
+    assert not compiled["errors"]
+    assert "reference_source_removed" in _codes(compiled, "warnings")
 
 
 def test_missing_staging_fails_open_and_never_seeds_override():
@@ -270,15 +277,15 @@ def test_enqueue_freezes_policy_and_requeue_retains_it():
     assert job.prompt == original
 
 
-def test_prompt_bridge_accepts_unstaged_and_refuses_deleted_item():
+def test_prompt_bridge_accepts_unstaged_and_leaves_out_deleted_item():
     from test_prompt_bridge import _import_prompt_bridge
     bridge = _import_prompt_bridge()
     project, scene = _generic_project()
     project._execution_context = {"scene_id":scene.scene_id, "context_start":0, "context_end":100}
     assert "WALK" in bridge.build_window_relay_payload(project)["smart_prompt"]
     scene.reference_items = []
-    with pytest.raises(RuntimeError, match="broken_reference_source"):
-        bridge.build_window_relay_payload(project)
+    smart = bridge.build_window_relay_payload(project)["smart_prompt"]
+    assert "WALK" in smart and "CHIP TEXT" not in smart
 
 
 @pytest.mark.parametrize("shared", ["group", "unit"])
@@ -443,10 +450,14 @@ def test_scope_override_badge_survives_diagnostics_sweep():
     start = panel_source.index('        for (const chip of panel.querySelectorAll("[data-attachment-id]"))')
     end = panel_source.index('        refreshWritingCompiled(payload);', start)
     sweep = panel_source[start:end]
+    mark_start = panel_source.index("export function paintSourceRemovedMark(")
+    mark_source = panel_source[mark_start:panel_source.index("\n}\n", mark_start) + 2]
+    mark_source = mark_source.replace("export function", "function", 1)
     uri = (ROOT / "web/js/prompt_context_diagnostics.js").as_uri()
     result = _run_chip_dom_script(f"""
-const {{promptCapabilityDiagnostics, promptContextDiagnosticTitle}} = await import({json.dumps(uri)});
+const {{promptCapabilityDiagnostics, promptContextDiagnosticTitle, REFERENCE_SOURCE_REMOVED}} = await import({json.dumps(uri)});
 const COLORS = {{dangerText:'red',warningText:'yellow'}};
+{mark_source}
 const panel = mod.createScopeChipRow({{attachments:[{{attachment_id:'a',kind:'reference',
  config:{{reference_prose:'keep'}},source:{{}}}}],allowedKinds:['reference']}});
 const state = {{byAttachment:{{a:[{{tier:'warning',message:'Advisory',origin:''}}]}}}};

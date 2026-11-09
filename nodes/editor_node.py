@@ -582,6 +582,27 @@ class SonderEditor:
         return False
 
     @classmethod
+    def _execution_reaches_prompt_relay_bridge(cls, prompt, unique_id, scope=None) -> bool:
+        """Whether a Prompt Relay Bridge that will run reads this editor's project.
+
+        The Bridge compiles the same live window itself but has no prompt id to
+        tell run feedback with, so the Editor notes removed sources for it."""
+        if not isinstance(prompt, dict) or unique_id in {None, ""}:
+            return False
+        for node_id, node in prompt.items():
+            if not isinstance(node, dict) or node.get("class_type") != "SonderPromptRelayBridge":
+                continue
+            if scope is not None and str(node_id) not in scope:
+                continue
+            inputs = node.get("inputs", {})
+            if not isinstance(inputs, dict):
+                continue
+            project_source = cls._prompt_linked_node_id(inputs.get("project"))
+            if cls._upstream_reaches_editor(prompt, project_source, unique_id):
+                return True
+        return False
+
+    @classmethod
     def _log_output_demand(
         cls,
         demanded_output_slots,
@@ -1417,8 +1438,14 @@ class SonderEditor:
             # Shot timestamps need the EFFECTIVE rate: a scene inheriting
             # project FPS stores 0.0, which would silently drop every stamp.
             prompt_fps = effective_scene_fps(proj, scene)
+            prompt_warnings = []
             if queue_job:
                 prompt_text = getattr(queue_job, "prompt", "")
+                # The frozen compile's warnings: a source removed before enqueue
+                # warns again when the job runs (Phase 3b).
+                frozen_context = getattr(queue_job, "compiled_prompt_context", None)
+                if isinstance(frozen_context, dict):
+                    prompt_warnings = list(frozen_context.get("warnings") or [])
                 if snapshot_version <= 0 and not prompt_text:
                     prompt_text = scene.get_prompt_for_range(
                         render_start, render_end,
@@ -1443,6 +1470,7 @@ class SonderEditor:
                         boundary_threshold_pct=prompt_threshold,
                         template=prompt_template, fps=prompt_fps), "errors": []}
                 prompt_text = compiled_prompt.get("prompt", "")
+                prompt_warnings = list(compiled_prompt.get("warnings") or [])
                 prompt_errors = list(compiled_prompt.get("errors") or [])
                 if prompt_errors:
                     first = prompt_errors[0]
@@ -1454,6 +1482,14 @@ class SonderEditor:
                             "Sonder live Prompt Context has blocking diagnostics; "
                             "output demand is unknown, so execution keeps the legacy "
                             "fail-open prompt string: %s", detail)
+            # Chips left out because their Reference sources were removed: one
+            # warning in this run's notice. Not when the prompt goes unused --
+            # the Editor's prompt output and a Prompt Relay Bridge reading its
+            # project are the two ways a run uses it.
+            if (prompt_needed or demand_unknown
+                    or self._execution_reaches_prompt_relay_bridge(prompt, unique_id, execution_scope)):
+                _note_run_feedback("note_reference_sources_removed", prompt, unique_id,
+                                   getattr(scene, "name", "") or "", prompt_warnings)
 
             # --- Load audio from scene's audio tracks for the render range ---
             if audio_needed:
