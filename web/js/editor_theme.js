@@ -23,6 +23,10 @@ export const THEME = Object.freeze({
     statusCompleted: "#6b9e7a",
     statusPending: "#c98a4b",
     statusFailed: "#b26464",
+    // The favorite star's amber, on every surface that shows one (gallery
+    // rows, Inspect, Compare, the timeline). Equal to statusPending: favorites
+    // have always worn it, and this name keeps a later hue a one-line edit.
+    favoriteStar: "#c98a4b",
 });
 
 export const TYPE = Object.freeze({

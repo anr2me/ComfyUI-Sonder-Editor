@@ -544,6 +544,23 @@ def test_the_host_acknowledges_without_reloading_the_asset_list():
     """)
 
 
+def test_a_favorite_acknowledgement_redraws_the_timeline_stars_once():
+    # The timeline's favorite stars read `favorite` from the host's records;
+    # this window's own write is acknowledged here, never by a list reload.
+    _run_gesture_node(_HOST + """
+        let timelineRenders = 0;
+        w._renderTimeline = () => { timelineRenders += 1; };
+        replies.push([200, { asset_id: 'a', favorite: true }]);
+        await w._updateAssetMetadata('a', { favorite: true });
+        assert.equal(w._pathToAsset['media/a.png'].favorite, true);
+        assert.equal(timelineRenders, 1);
+        replies.push([200, { asset_id: 'a', folder: 'Shots' }]);
+        await w._updateAssetMetadata('a', { folder: 'Shots' });
+        assert.equal(timelineRenders, 1, 'a folder move changes nothing the timeline draws');
+        assert.equal(fetchedAssets, 0);
+    """)
+
+
 def test_the_host_classifies_each_asset_write_conflict():
     _run_gesture_node(_HOST + """
         // Protection: a 409 without a code is for the gallery to confirm.

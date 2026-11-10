@@ -768,21 +768,33 @@ export function _drawMutedOverlay(host, ctx, x, y, w, h, label = "Hidden") {
         ctx.restore();
     }
 
-function drawLinkBadge(host, ctx, x, y, w, h, group) {
-        if (w <= 22 || h <= 12) return;
+// Where the link badge goes, without drawing it. The favorite star reads this
+// to sit left of the badge, before the label is drawn (the label gives way).
+function linkBadgeGeometry(host, ctx, x, y, w, h, group) {
+        if (!group || w <= 22 || h <= 12) return null;
         // Group identity label (A..Z, AA..) instead of a generic "link" tag;
         // a group containing a locked member shows a lock glyph in danger color
         // on EVERY member so effective lock is visible group-wide.
-        const label = (group && host._linkGroupLabel?.(group)) || "link";
-        const locked = !!(group && host._isLinkGroupLocked?.(group));
+        const label = host._linkGroupLabel?.(group) || "link";
+        const locked = !!host._isLinkGroupLocked?.(group);
         const text = locked ? `🔒${label}` : label;
         ctx.save();
         ctx.font = host._canvasSansFont(Math.max(7, Math.round(7 * host._scaleTimeline)), 700);
         const textW = ctx.measureText(text).width;
+        ctx.restore();
         const badgeW = Math.min(w - 4, Math.max(18, Math.ceil(textW) + 10));
         const badgeH = Math.min(13, Math.max(10, h - 6));
-        const badgeX = x + w - badgeW - 4;
-        const badgeY = y + 4;
+        return { text, locked, badgeX: x + w - badgeW - 4, badgeY: y + 4, badgeW, badgeH };
+    }
+
+// `known` is the geometry a caller already measured (clips and audio, for the
+// star); guides measure here.
+function drawLinkBadge(host, ctx, x, y, w, h, group, known = undefined) {
+        const geometry = known === undefined ? linkBadgeGeometry(host, ctx, x, y, w, h, group) : known;
+        if (!geometry) return;
+        const { text, locked, badgeX, badgeY, badgeW, badgeH } = geometry;
+        ctx.save();
+        ctx.font = host._canvasSansFont(Math.max(7, Math.round(7 * host._scaleTimeline)), 700);
         ctx.globalAlpha = Math.min(1, ctx.globalAlpha * 0.95);
         ctx.fillStyle = "rgba(4, 8, 14, 0.68)";
         ctx.fillRect(badgeX, badgeY, badgeW, badgeH);
@@ -794,6 +806,58 @@ function drawLinkBadge(host, ctx, x, y, w, h, group) {
         ctx.fillText(text, badgeX + badgeW / 2, badgeY + badgeH - 3);
         ctx.restore();
     }
+
+const FAVORITE_STAR_GLYPH = "★";
+
+function favoriteStarSize(host) {
+    return Math.max(9, Math.round(11 * (host._scaleTimeline || 1)));
+}
+
+// A clip's or audio item's favorite star: top-right, left of the link badge
+// when one is drawn. `leftReserved` is the right edge of whatever the item
+// already shows top-left ("MD", the Hidden/Muted badge); a star that would
+// cross it, or the badge, is skipped rather than overlapping. Returns the
+// star's box, or null when no star is drawn.
+function favoriteStarGeometry(host, asset, x, y, w, h, linkBadge, leftReserved) {
+    if (!asset?.favorite || asset.missing || !host._timelineFavoriteStarsEnabled?.()) return null;
+    if (w <= 24 || h <= 12) return null;
+    const size = favoriteStarSize(host);
+    const right = linkBadge ? linkBadge.badgeX - 3 : x + w - 4;
+    const left = right - size;
+    if (left < Math.max(x + 2, leftReserved + 2)) return null;
+    return { x: left, y: y + 4, size };
+}
+
+// Where an item's label clip ends: left of the star when they share a band. A
+// bottom-aligned label in an item tall enough to keep it below the top-right
+// star keeps its full width.
+function labelRightEdge(host, star, x2, itemH) {
+    if (!star) return x2 - 4;
+    const bottomClear = host._clipLabelVerticalAlign?.() === "bottom" && itemH >= (star.size + 4) * 2 + 4;
+    return bottomClear ? x2 - 4 : star.x - 2;
+}
+
+function drawFavoriteStar(host, ctx, star, alpha) {
+    if (!star) return;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    // A dark backing keeps the star legible over a filmstrip or a waveform.
+    ctx.fillStyle = "rgba(4, 8, 14, 0.55)";
+    ctx.fillRect(star.x, star.y, star.size, star.size);
+    ctx.fillStyle = THEME.favoriteStar;
+    ctx.font = host._canvasSansFont(Math.max(8, star.size - 1), 700);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(FAVORITE_STAR_GLYPH, star.x + star.size / 2, star.y + star.size / 2 + 0.5);
+    ctx.restore();
+}
+
+// Right edge of the Hidden/Muted badge `_drawMutedOverlay` draws at an item's
+// top-left; the item's own x when it draws none. Mirrors that function.
+function mutedBadgeRight(itemX, itemW, label) {
+    if (itemW <= 28) return itemX;
+    return itemX + 3 + Math.min(itemW - 4, Math.max(24, label.length * 6 + 8));
+}
 
 export function _drawGuideMarkers(host, ctx, width) {
         if (!host.activeScene) return;
@@ -857,7 +921,13 @@ export function _drawGuideMarkers(host, ctx, width) {
             ctx.textAlign = "left";
             const labelPadX = Math.max(3, Math.round(3 * host._scaleTimeline));
             const labelGap = Math.max(4, Math.round(4 * host._scaleTimeline));
-            const labelW = Math.ceil(ctx.measureText(label).width) + labelPadX * 2;
+            const labelTextW = Math.ceil(ctx.measureText(label).width);
+            // A favorite guide's star rides inside its frame label, so it
+            // follows the label to whichever side of the marker it flips to.
+            const guideStarred = !!guideAsset?.favorite && !isMissingGuide
+                && !!host._timelineFavoriteStarsEnabled?.();
+            const guideStarSize = guideStarred ? Math.max(8, labelFontSize - 1) : 0;
+            const labelW = labelTextW + labelPadX * 2 + (guideStarred ? labelPadX + guideStarSize : 0);
             const labelH = labelFontSize + Math.max(3, Math.round(3 * host._scaleTimeline));
             let labelX = x + markerHalfW + labelGap;
             if (labelX + labelW > width - 2) labelX = x - markerHalfW - labelGap - labelW;
@@ -867,6 +937,15 @@ export function _drawGuideMarkers(host, ctx, width) {
                 ctx.fillRect(labelX, labelY - labelFontSize, labelW, labelH);
                 ctx.fillStyle = isMissingGuide ? COLORS.missingMediaText : (guideHidden ? COLORS.textDim : COLORS.text);
                 ctx.fillText(label, labelX + labelPadX, labelY);
+                if (guideStarred) {
+                    // Alpha was reset to 1 for the label; a hidden guide dims its star.
+                    ctx.save();
+                    ctx.globalAlpha = guideHidden ? 0.42 : 1.0;
+                    ctx.fillStyle = THEME.favoriteStar;
+                    ctx.font = host._canvasSansFont(guideStarSize, 700);
+                    ctx.fillText(FAVORITE_STAR_GLYPH, labelX + labelPadX * 2 + labelTextW, labelY);
+                    ctx.restore();
+                }
             }
             {
                 const linkGroup = host._linkGroupForItem?.({ type: "guide", id: guide.frame_index, data: guide });
@@ -1005,6 +1084,21 @@ export function _drawClips(host, ctx, width) {
                     ctx.restore();
                 }
 
+                // Badges decided before the label, so the label can give way to the star.
+                const clipLinkGroup = host._linkGroupForItem?.({ type: "clip", id: clip.clip_id, data: clip });
+                const clipLinkBadge = clipLinkGroup
+                    ? linkBadgeGeometry(host, ctx, x1 + 1, videoY + 2, x2 - x1 - 2, videoH - 4, clipLinkGroup)
+                    : null;
+                let clipLeftReserved = x1 + 1;
+                if (isMotionDriverLane && (x2 - x1) > 24) {
+                    clipLeftReserved = x1 + Math.round(4 * host._scaleTimeline) + Math.round(18 * host._scaleTimeline);
+                }
+                if (clipMuted) {
+                    clipLeftReserved = Math.max(clipLeftReserved, mutedBadgeRight(x1 + 1, x2 - x1 - 2, "Hidden"));
+                }
+                const clipStar = favoriteStarGeometry(
+                    host, clipAsset, x1 + 1, videoY + 2, x2 - x1 - 2, videoH - 4, clipLinkBadge, clipLeftReserved);
+
                 // Clip label
                 const label = host._formatClipTimelineLabel(clip, clipAsset, isMissingClip);
                 if (label) {
@@ -1013,7 +1107,7 @@ export function _drawClips(host, ctx, width) {
                     ctx.font = host._canvasSansFont(fontSize, 600);
                     const railPad = Math.round(9 * host._scaleTimeline);
                     const labelX = isMotionDriverLane ? x1 + Math.round(30 * host._scaleTimeline) : x1 + railPad;
-                    const labelW = Math.max(0, x2 - labelX - 4);
+                    const labelW = Math.max(0, labelRightEdge(host, clipStar, x2, videoH - 4) - labelX);
                     const labelH = videoH - 4;
                     const labelPoint = timelineLabelPoint(host, labelX, videoY + 2, labelW, labelH, fontSize);
                     ctx.save();
@@ -1088,10 +1182,8 @@ export function _drawClips(host, ctx, width) {
                 if (clipMuted) {
                     host._drawMutedOverlay(ctx, x1 + 1, videoY + 2, x2 - x1 - 2, videoH - 4, "Hidden");
                 }
-                {
-                    const linkGroup = host._linkGroupForItem?.({ type: "clip", id: clip.clip_id, data: clip });
-                    if (linkGroup) drawLinkBadge(host, ctx, x1 + 1, videoY + 2, x2 - x1 - 2, videoH - 4, linkGroup);
-                }
+                if (clipLinkGroup) drawLinkBadge(host, ctx, x1 + 1, videoY + 2, x2 - x1 - 2, videoH - 4, clipLinkGroup, clipLinkBadge);
+                drawFavoriteStar(host, ctx, clipStar, baseAlpha);
 
                 // Permanent trim ghost
                 const clipOrigin = clip.source_origin_frame || 0;
@@ -1208,6 +1300,17 @@ export function _drawClips(host, ctx, width) {
                     ctx.fillRect(x1 + 2, audioY + audioH - 5, volBarW, 2);
                 }
 
+                // Badges decided before the label, so the label can give way to the star.
+                const audioLinkGroup = host._linkGroupForItem?.({ type: "audio", id: track.track_id, data: track });
+                const audioLinkBadge = audioLinkGroup
+                    ? linkBadgeGeometry(host, ctx, x1 + 1, audioY + 2, x2 - x1 - 2, audioH - 4, audioLinkGroup)
+                    : null;
+                const audioLeftReserved = track.muted
+                    ? mutedBadgeRight(x1 + 1, x2 - x1 - 2, "Muted")
+                    : x1 + 1;
+                const audioStar = favoriteStarGeometry(
+                    host, audioAsset, x1 + 1, audioY + 2, x2 - x1 - 2, audioH - 4, audioLinkBadge, audioLeftReserved);
+
                 // Audio label
                 if ((x2 - x1) > 30) {
                     const audioLabel = host._formatAudioTimelineLabel(track, audioAsset, isMissingAudio);
@@ -1216,7 +1319,7 @@ export function _drawClips(host, ctx, width) {
                         const fontSize = Math.round(8 * host._scaleTimeline);
                         ctx.font = host._canvasSansFont(fontSize, 600);
                         const labelX = x1 + Math.round(9 * host._scaleTimeline);
-                        const labelW = Math.max(0, x2 - labelX - 4);
+                        const labelW = Math.max(0, labelRightEdge(host, audioStar, x2, audioH - 4) - labelX);
                         const labelH = audioH - 4;
                         const labelPoint = timelineLabelPoint(host, labelX, audioY + 2, labelW, labelH, fontSize);
                         ctx.save();
@@ -1248,10 +1351,8 @@ export function _drawClips(host, ctx, width) {
                 if (track.muted) {
                     host._drawMutedOverlay(ctx, x1 + 1, audioY + 2, x2 - x1 - 2, audioH - 4, "Muted");
                 }
-                {
-                    const linkGroup = host._linkGroupForItem?.({ type: "audio", id: track.track_id, data: track });
-                    if (linkGroup) drawLinkBadge(host, ctx, x1 + 1, audioY + 2, x2 - x1 - 2, audioH - 4, linkGroup);
-                }
+                if (audioLinkGroup) drawLinkBadge(host, ctx, x1 + 1, audioY + 2, x2 - x1 - 2, audioH - 4, audioLinkGroup, audioLinkBadge);
+                drawFavoriteStar(host, ctx, audioStar, audioMuted ? 0.3 : 1.0);
 
                 // Permanent trim ghost for audio
                 const audioOrigin = track.source_origin_frame || 0;

@@ -70,11 +70,10 @@ const AUDIO_DUCK_VOLUME = Math.pow(10, -3 / 20);
 const LIST_NAV_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]);
 const OVERLAY_MEDIA_CACHE_LIMIT = 8;
 // The favorite star's amber, on every surface that shows one: the row and
-// toolbar buttons, the compare canvas stars and the compare list marks.
-// Deliberately `statusPending` although the theme rule keeps pending/orange
-// for status: favorites have always worn it, the maintainer kept it when
-// compare gained stars, and one constant keeps any later hue a one-line edit.
-const FAVORITE_STAR_COLOR = THEME.statusPending;
+// toolbar buttons, the compare canvas stars, the compare list marks and the
+// timeline (editor_timeline_canvas.js). The theme token owns the value; the
+// maintainer kept the pending amber when compare gained stars.
+const FAVORITE_STAR_COLOR = THEME.favoriteStar;
 // How long an Inspect star ignores clicks after an elimination put a new asset
 // under it (a compare side, or the single view moving on): the second click of
 // a double-click would land on the newcomer. Windows' default double-click time.
@@ -762,6 +761,44 @@ function makeSectionTitle(label) {
     return title;
 }
 
+// What an explicit Refresh's failure says, keyed by what the error is, never
+// by echoing its message (durable rule: notify*(error?.message || …)). The one
+// exception is unreadable storage, whose curated server sentence is the
+// authority Import already shows. The raw text rides along as `detail`.
+export function refreshFailureMessage(error) {
+    const code = error?.code || error?.payload?.code || "";
+    if (code === "project_storage_unreadable") {
+        const curated = error?.payload?.error || error?.payload?.message;
+        if (typeof curated === "string" && curated.trim()) return curated;
+    }
+    if (code === "project_version_conflict") {
+        return "The project changed while assets were refreshing. Try again.";
+    }
+    if (error?.status === 404) {
+        return "This project could not be found. Reopen it, then try Refresh again.";
+    }
+    if (!Number.isInteger(error?.status)) {
+        return "Couldn't refresh assets — ComfyUI didn't answer. The list shown is the last one loaded.";
+    }
+    return "Couldn't refresh assets. The list shown is the last one loaded.";
+}
+
+// A row's hover hint names where a drag of it lands. The drop target is a host
+// fact (`options.dropTarget`): the canvas card's drags reach the ComfyUI graph,
+// while fullscreen, Mount in Tab and the Sonder App drop onto the timeline,
+// which routes images to guide frames and video/audio to matching lanes.
+export function assetRowDragHint(asset, { manageMode = false, dropTarget = "graph" } = {}) {
+    if (manageMode) return "Click to inspect. Drag onto a folder header to move assets.";
+    const type = asset?.asset_type;
+    if (dropTarget === "timeline") {
+        if (type === "artifact") return "Click to inspect. Artifacts can't be placed on the timeline.";
+        if (type === "image") return "Click to inspect. Drag onto the timeline to add a guide frame.";
+        return "Click to inspect. Drop on a matching lane, or on the ruler to create a new lane.";
+    }
+    if (type === "artifact") return "Click to inspect. Artifacts can't be dropped on the graph.";
+    return "Click to inspect. Drag onto the graph to create a loader node.";
+}
+
 export function mountSharedAssetGallery(container, options = {}) {
     let dataProjectDir = null;
     // List snapshot version from the host: which list this gallery shows, independent of
@@ -1069,12 +1106,7 @@ export function mountSharedAssetGallery(container, options = {}) {
     refreshBtn.textContent = "Refresh";
     refreshBtn.addEventListener("click", async () => {
         hideContextMenu();
-        setBusyButton(refreshBtn, true, "Refreshing...", "Refresh");
-        try {
-            await options.onRefresh?.();
-        } finally {
-            setBusyButton(refreshBtn, false, "Refreshing...", "Refresh");
-        }
+        await runExplicitRefresh();
     });
     controls.appendChild(refreshBtn);
 
@@ -2982,6 +3014,70 @@ export function mountSharedAssetGallery(container, options = {}) {
             return;
         }
         notifyError(message, { source: "gallery-asset-write", detail: error?.message || null });
+    }
+
+    /**
+     * Explicit Refresh: the Refresh button, the background menu's Refresh and
+     * its Retry. The host's `onRefresh({ explicit: true })` rejects only for a
+     * transport failure in the project still open; a project switch, a stale
+     * answer or a deferral resolves. The list is never touched on failure: it
+     * stays the last one loaded. Implicit refreshes (after Import, a move or a
+     * drop) call `onRefresh()` without the flag and stay silent.
+     */
+    async function runExplicitRefresh() {
+        if (!options.onRefresh || state.destroyed || state.explicitRefreshRunning) return;
+        const projectDir = currentProjectDir();
+        state.explicitRefreshRunning = true;
+        setBusyButton(refreshBtn, true, "Refreshing...", "Refresh");
+        try {
+            await options.onRefresh({ explicit: true });
+            dismissRefreshFailure();
+        } catch (error) {
+            reportRefreshFailure(error, projectDir);
+        } finally {
+            state.explicitRefreshRunning = false;
+            setBusyButton(refreshBtn, false, "Refreshing...", "Refresh");
+        }
+    }
+
+    // One notification slot per gallery instance: two galleries on a page (two
+    // canvas cards, or a card and fullscreen) must not merge their failures,
+    // retarget each other's Retry or dismiss each other's notice.
+    const refreshNoticeSource = `gallery-refresh:${detailOwnerBase}`;
+
+    function dismissRefreshFailure() {
+        const handle = state.refreshFailureNotice;
+        state.refreshFailureNotice = null;
+        state.refreshFailureProjectDir = "";
+        try { handle?.dismiss?.(); } catch (error) { console.warn("[Sonder] Notice dismiss failed:", error); }
+    }
+
+    // The one reporter for an explicit Refresh's failure, also called by a
+    // host replaying an explicit Refresh it deferred behind pending edits.
+    function reportRefreshFailure(error, projectDir = currentProjectDir()) {
+        if (state.destroyed || projectDir !== currentProjectDir()) return;
+        console.warn("[Sonder] Asset refresh failed:", error);
+        const code = error?.code || error?.payload?.code || "";
+        state.refreshFailureProjectDir = projectDir;
+        state.refreshFailureNotice = notifyError(refreshFailureMessage(error), {
+            source: refreshNoticeSource,
+            detail: error?.message || null,
+            // Unreadable storage is the server's problem: retrying can't fix it.
+            // Retry belongs to the project it failed in; after a switch it only
+            // closes the notice.
+            onRetry: code === "project_storage_unreadable" ? null : () => {
+                if (currentProjectDir() !== projectDir) {
+                    dismissRefreshFailure();
+                    return;
+                }
+                void runExplicitRefresh();
+            },
+        });
+    }
+
+    function noteRefreshPending() {
+        if (state.destroyed) return;
+        notifyInfo("Assets will refresh once your edits have saved.", { source: refreshNoticeSource });
     }
 
     function folderContainsPath(folderName, candidate) {
@@ -7276,7 +7372,7 @@ export function mountSharedAssetGallery(container, options = {}) {
         return [
             { label: "Create Folder", action: async () => await promptCreateFolder() },
             { label: "Import Files", action: () => fileInput.click() },
-            { label: "Refresh", action: async () => await options.onRefresh?.() },
+            { label: "Refresh", action: async () => await runExplicitRefresh() },
         ];
     }
 
@@ -7772,11 +7868,7 @@ export function mountSharedAssetGallery(container, options = {}) {
         row.dataset.assetRow = asset.asset_id;
         row.dataset.rowFocused = isFocused ? "true" : "false";
         row.draggable = state.manageMode ? !!options.onBulkMoveAssets : true;
-        row.title = state.manageMode
-            ? "Click to inspect. Drag onto a folder header to move assets."
-            : (asset.asset_type === "artifact"
-                ? "Click to inspect. Artifact graph-drop support is deferred."
-                : "Click to inspect. Drag onto the graph to create a loader node.");
+        row.title = assetRowDragHint(asset, { manageMode: state.manageMode, dropTarget: options.dropTarget });
         row.addEventListener("click", (event) => {
             handleAssetActivation(asset.asset_id, event, visibleAssets, { focusList: true, scrollIntoView: true });
         });
@@ -7997,11 +8089,7 @@ export function mountSharedAssetGallery(container, options = {}) {
                 row.dataset.assetRow = asset.asset_id;
                 row.dataset.rowFocused = isFocused ? "true" : "false";
                 row.draggable = state.manageMode ? !!options.onBulkMoveAssets : true;
-                row.title = state.manageMode
-                    ? "Click to inspect. Drag onto a folder header to move assets."
-                    : (asset.asset_type === "artifact"
-                        ? "Click to inspect. Artifact graph-drop support is deferred."
-                        : "Click to inspect. Drag onto the graph to create a loader node.");
+                row.title = assetRowDragHint(asset, { manageMode: state.manageMode, dropTarget: options.dropTarget });
                 row.addEventListener("click", (event) => {
                     handleAssetActivation(asset.asset_id, event, visibleAssets, { focusList: true, scrollIntoView: true });
                 });
@@ -8593,6 +8681,10 @@ export function mountSharedAssetGallery(container, options = {}) {
         forgetPaintedSceneIfChanged();
         const sameProject = dataProjectDir === currentProjectDir();
         dataProjectDir = currentProjectDir();
+        // A Refresh failure belongs to the project it happened in.
+        if (state.refreshFailureNotice && state.refreshFailureProjectDir !== dataProjectDir) {
+            dismissRefreshFailure();
+        }
         const previousAssets = sameProject ? data.assets : [];
         const previousFolders = sameProject ? data.folders : [];
         const nextAssets = Array.isArray(payload.assets) ? [...payload.assets] : [];
@@ -8683,6 +8775,8 @@ export function mountSharedAssetGallery(container, options = {}) {
         closeInspectOverlay();
         clearOverlayMediaCache();
         dismissFavoriteRemovalNotice();
+        // Its Retry would call a host that is gone.
+        dismissRefreshFailure();
         hideContextMenu();
         destroyLiveMedia();
         detailLoader.destroy();
@@ -8695,6 +8789,9 @@ export function mountSharedAssetGallery(container, options = {}) {
         root,
         setData,
         destroy,
+        // For a host replaying an explicit Refresh it deferred (editor_widget.js).
+        reportRefreshFailure,
+        noteRefreshPending,
         cancelThumbnailRepairs: () => {
             thumbnailRepairObserver?.disconnect?.();
             cancelThumbnailRepairOwners();

@@ -25,6 +25,7 @@ from .media_helpers import (
     apply_rgb_color_correction,
     color_correction_for_interpretation,
     decode_video_frame,
+    extract_embedded_workflow_metadata,
     get_ffmpeg_path,
     get_ffprobe_path,
     is_valid_media_metadata,
@@ -8851,168 +8852,15 @@ def _asset_payloads(project: TimelineProject, assets) -> list[dict]:
     ]
 
 
-def _parse_metadata_json(value):
-    if value is None or value == "":
-        return None
-    if isinstance(value, (dict, list)):
-        return value
-    try:
-        return json.loads(str(value))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return None
-
-
-def _workflow_from_metadata_tags(tags: dict):
-    if not isinstance(tags, dict):
-        return None
-    editor_export = None
-    for key, value in tags.items():
-        normalized = str(key or "").lower()
-        if normalized == "workflow":
-            parsed = _parse_metadata_json(value)
-            if isinstance(parsed, dict):
-                return parsed
-        elif normalized == "editor_export":
-            parsed = _parse_metadata_json(value)
-            if isinstance(parsed, dict):
-                editor_export = parsed
-    workflow = editor_export.get("workflow") if isinstance(editor_export, dict) else None
-    return workflow if isinstance(workflow, dict) else None
-
-
-def _extract_png_workflow_metadata(path: str):
-    try:
-        from PIL import Image
-
-        with Image.open(path) as image:
-            return _workflow_from_metadata_tags(image.info or {})
-    except Exception as exc:
-        logger.debug("PNG workflow metadata extraction failed for %s: %s", path, exc)
-        return None
-
-
-def _ffmetadata_unescape(value: str) -> str:
-    result = []
-    escaped = False
-    replacements = {"n": "\n", "r": "\r"}
-    for char in str(value):
-        if escaped:
-            result.append(replacements.get(char, char))
-            escaped = False
-        elif char == "\\":
-            escaped = True
-        else:
-            result.append(char)
-    if escaped:
-        result.append("\\")
-    return "".join(result)
-
-
-def _split_ffmetadata_line(line: str) -> tuple[str, str] | None:
-    escaped = False
-    for index, char in enumerate(str(line)):
-        if escaped:
-            escaped = False
-            continue
-        if char == "\\":
-            escaped = True
-            continue
-        if char == "=":
-            return (_ffmetadata_unescape(line[:index]), _ffmetadata_unescape(line[index + 1:]))
-    return None
-
-
-def _parse_ffmetadata_tags(text: str) -> dict:
-    tags = {}
-    for raw_line in str(text or "").splitlines():
-        line = raw_line.strip()
-        if not line or line == ";FFMETADATA1" or line.startswith(("#", ";")):
-            continue
-        if line.startswith("["):
-            continue
-        pair = _split_ffmetadata_line(raw_line)
-        if not pair:
-            continue
-        key, value = pair
-        if key:
-            tags[key] = value
-    return tags
-
-
-def _extract_video_workflow_metadata_ffprobe(path: str):
-    import subprocess
-
-    result = subprocess.run(
-        [
-            get_ffprobe_path(),
-            "-v",
-            "quiet",
-            "-show_format",
-            "-print_format",
-            "json",
-            str(path),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if result.returncode != 0:
-        logger.debug("ffprobe workflow metadata extraction failed for %s: %s", path, (result.stderr or "")[:240])
-        return None
-    data = json.loads(result.stdout or "{}")
-    tags = ((data.get("format") or {}).get("tags") or {})
-    return _workflow_from_metadata_tags(tags)
-
-
-def _extract_video_workflow_metadata_ffmpeg(path: str):
-    import subprocess
-
-    result = subprocess.run(
-        [
-            get_ffmpeg_path(),
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            str(path),
-            "-f",
-            "ffmetadata",
-            "-",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if result.returncode != 0:
-        logger.debug("ffmpeg workflow metadata extraction failed for %s: %s", path, (result.stderr or "")[:240])
-        return None
-    return _workflow_from_metadata_tags(_parse_ffmetadata_tags(result.stdout or ""))
-
-
-def _extract_video_workflow_metadata(path: str):
-    try:
-        workflow = _extract_video_workflow_metadata_ffprobe(path)
-        if workflow is not None:
-            return workflow
-    except Exception as exc:
-        logger.debug("ffprobe video workflow metadata extraction failed for %s: %s", path, exc)
-    try:
-        return _extract_video_workflow_metadata_ffmpeg(path)
-    except Exception as exc:
-        logger.debug("ffmpeg video workflow metadata extraction failed for %s: %s", path, exc)
-    return None
-
-
 def _extract_embedded_workflow(project: TimelineProject, asset: Asset):
+    # One reader for embedded workflows: media_helpers owns the PNG, ffprobe
+    # and ffmetadata paths and their UTF-8 decoding. The route kept a
+    # line-for-line copy until Phase 4 (2026-11), which is why a fix to one
+    # never reached the other.
     path = _asset_abspath(project, asset)
     if not path or not os.path.isfile(path):
         return None
-    ext = os.path.splitext(path)[1].lower()
-    if ext == ".png":
-        return _extract_png_workflow_metadata(path)
-    if ext in {".mp4", ".m4v", ".mov", ".mkv"}:
-        return _extract_video_workflow_metadata(path)
-    return None
+    return extract_embedded_workflow_metadata(path)
 
 
 def _get_audio_duration(filepath: str) -> float:
@@ -9081,7 +8929,7 @@ def _extract_audio_from_video(video_path: str, output_path: str) -> bool:
         result = subprocess.run(
             [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", video_path, "-vn",
              "-acodec", "pcm_f32le", "-rf64", "auto", output_path],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
         )
         if result.returncode == 0 and os.path.isfile(output_path):
             logger.info("Extracted audio from video via ffmpeg: %s", os.path.basename(video_path))
@@ -14041,7 +13889,10 @@ if routes is not None:
         if not asset:
             return _json_error(f"Asset not found: {asset_id}", 404)
 
-        workflow = _extract_embedded_workflow(project, asset)
+        # ffprobe/ffmpeg never run on the event loop (durable rule). The
+        # project is already loaded and only the asset's path is read, so no
+        # project lock is needed for the probe.
+        workflow = await asyncio.to_thread(_extract_embedded_workflow, project, asset)
         if workflow is None:
             return web.json_response({"reason": "unavailable"}, status=404)
         return web.json_response({"workflow": workflow, "source": "embedded"})

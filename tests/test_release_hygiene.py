@@ -259,6 +259,146 @@ def test_source_text_has_no_raw_nul_bytes():
     assert not findings, "raw NUL bytes in source text:\n" + "\n".join(findings)
 
 
+_SUBPROCESS_TEXT_CALLS = frozenset({"run", "Popen", "check_output", "call", "check_call"})
+_SUBPROCESS_LOCALE_ONLY = frozenset({"getoutput", "getstatusoutput"})
+# Shipped Python that can run a subprocess. tests/ is a harness, not shipped.
+_SUBPROCESS_SCAN_DIRS = ("server", "nodes", "tools")
+# Helpers whose `**` spread is known to carry no text-mode flag:
+# `_low_priority_popen_kwargs` returns only `creationflags`.
+_SUBPROCESS_KWARG_HELPERS = frozenset({"_low_priority_popen_kwargs"})
+
+
+def _subprocess_text_decoding_findings(source: str, label: str) -> list[str]:
+    """Text-mode subprocess reads that would decode with the locale codec.
+
+    On Windows that codec is cp1252, which leaves five bytes undefined; UTF-8
+    output containing one (a curly quote's 0x9D) kills subprocess's reader
+    thread, so the output comes back None and nothing raises. Every text-mode
+    call therefore names `encoding=`. A call that hides its flags (`**kwargs`,
+    a non-literal `text=`) cannot be checked and fails too.
+    """
+    import ast
+
+    tree = ast.parse(source)
+    module_aliases = {"subprocess"}
+    function_aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "subprocess":
+                    module_aliases.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module == "subprocess":
+            for alias in node.names:
+                function_aliases[alias.asname or alias.name] = alias.name
+
+    findings = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = None
+        if (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+                and func.value.id in module_aliases):
+            name = func.attr
+        elif isinstance(func, ast.Name) and func.id in function_aliases:
+            name = function_aliases[func.id]
+        if name is None:
+            continue
+        where = f"{label}:{node.lineno}"
+        if name in _SUBPROCESS_LOCALE_ONLY:
+            findings.append(f"{where}: subprocess.{name} always decodes with the locale codec")
+            continue
+        if name not in _SUBPROCESS_TEXT_CALLS:
+            continue
+        keywords = {kw.arg: kw.value for kw in node.keywords if kw.arg is not None}
+        spreads = [kw.value for kw in node.keywords if kw.arg is None]
+        if any(not _known_flag_spread(value) for value in spreads):
+            findings.append(f"{where}: subprocess.{name}(**...) hides whether it decodes text")
+            continue
+        text_mode = False
+        for flag in ("text", "universal_newlines"):
+            value = keywords.get(flag)
+            if value is None:
+                continue
+            if not isinstance(value, ast.Constant):
+                findings.append(f"{where}: subprocess.{name}({flag}=<expression>) cannot be checked")
+                text_mode = None
+                break
+            text_mode = text_mode or bool(value.value)
+        if text_mode is None:
+            continue
+        # `encoding=` or `errors=` alone also switches to text mode.
+        text_mode = text_mode or "encoding" in keywords or "errors" in keywords
+        if not text_mode:
+            continue
+        encoding = keywords.get("encoding")
+        utf8 = (isinstance(encoding, ast.Constant) and isinstance(encoding.value, str)
+                and encoding.value.lower().replace("-", "") == "utf8")
+        if not utf8:
+            findings.append(f'{where}: subprocess.{name} decodes text without encoding="utf-8"')
+        elif "errors" not in keywords:
+            findings.append(f'{where}: subprocess.{name}(encoding="utf-8") without errors= (strict decoding '
+                            'kills the reader thread the same way)')
+    return findings
+
+
+def _known_flag_spread(value) -> bool:
+    """`**helper()` or `**(helper() if cond else {})` for an allowlisted helper."""
+    import ast
+
+    def helper_call(node):
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in _SUBPROCESS_KWARG_HELPERS and not node.args and not node.keywords)
+
+    if helper_call(value):
+        return True
+    return (isinstance(value, ast.IfExp) and helper_call(value.body)
+            and isinstance(value.orelse, ast.Dict) and not value.orelse.keys)
+
+
+def test_subprocess_text_reads_name_their_encoding():
+    findings = []
+    for directory in _SUBPROCESS_SCAN_DIRS:
+        for path in sorted((ROOT / directory).rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            findings.extend(_subprocess_text_decoding_findings(
+                path.read_text(encoding="utf-8"), str(path.relative_to(ROOT))))
+    assert not findings, (
+        'text-mode subprocess calls must pass encoding="utf-8", errors="replace":\n'
+        + "\n".join(findings))
+
+
+def test_subprocess_encoding_guard_catches_each_bypass():
+    violations = "\n".join((
+        "import subprocess",
+        "import subprocess as sp",
+        "from subprocess import run as go, check_output",
+        "subprocess.run(['a'], capture_output=True, text=True)",
+        "sp.Popen(['a'], universal_newlines=True)",
+        "go(['a'], text=True)",
+        "check_output(['a'], text=True)",
+        "subprocess.run(['a'], **options)",
+        "subprocess.run(['a'], text=flag)",
+        "subprocess.getoutput('a')",
+        "subprocess.run(['a'], text=True, encoding='cp1252', errors='replace')",
+        "subprocess.run(['a'], text=True, encoding='utf-8')",
+        "subprocess.run(['a'], errors='replace')",
+        "subprocess.Popen(['a'], **{**_low_priority_popen_kwargs(), 'text': True})",
+    ))
+    assert len(_subprocess_text_decoding_findings(violations, "fixture")) == 11
+    clean = "\n".join((
+        "import subprocess",
+        "subprocess.run(['a'], capture_output=True, text=True, encoding='utf-8', errors='replace')",
+        "subprocess.run(['a'], capture_output=True)",
+        "subprocess.Popen(['a'], text=False)",
+        "subprocess.Popen(['a'], **(_low_priority_popen_kwargs() if low else {}))",
+        "subprocess.run(['a'], encoding='UTF-8', errors='replace')",
+        "subprocess.TimeoutExpired",
+    ))
+    assert _subprocess_text_decoding_findings(clean, "fixture") == []
+
+
 # The Prompt tool's four colour-bearing modules. Scoped deliberately: the
 # editor-wide normalization is its own execution-queue entry and 298 more raw
 # values, so widening this list is a decision, not a maintenance chore.

@@ -2614,12 +2614,16 @@ export class EditorNodeController {
         requiredVersion = "",
         reason = "assets",
         manual = false,
+        // An explicit Refresh asks to hear about a transport failure; only
+        // while the project it was asked for is still the one open.
+        rethrow = false,
     } = {}) {
         if (this._destroyed || !this.state.projectDir) return null;
         const projectDir = this.state.projectDir;
         const projectId = projectIdFromDir(projectDir);
+        let result;
         try {
-            const result = await requestProjectAssetRefresh({
+            result = await requestProjectAssetRefresh({
                 projectId,
                 mode,
                 waveId: waveId || allocateAssetRefreshWave(reason),
@@ -2629,20 +2633,27 @@ export class EditorNodeController {
                 manual,
                 diagnosticRecorder: (event) => this._recordDiagEvent(event.kind, event),
             });
-            if (
-                !result
-                || this._destroyed
-                || this.state.projectDir !== projectDir
-                || result.epoch !== getProjectAssetMutationEpoch(projectId)
-            ) {
-                return null;
-            }
-            this._seedAssetRefreshResult(result, projectDir);
-            return result;
         } catch (error) {
             console.warn("[Sonder] Failed to refresh assets:", error);
+            if (rethrow && !this._destroyed && this.state.projectDir === projectDir) throw error;
             return null;
         }
+        if (
+            !result
+            || this._destroyed
+            || this.state.projectDir !== projectDir
+            || result.epoch !== getProjectAssetMutationEpoch(projectId)
+        ) {
+            return null;
+        }
+        try {
+            this._seedAssetRefreshResult(result, projectDir);
+        } catch (error) {
+            // A frontend fault, not a failed refresh: never reported as one.
+            console.warn("[Sonder] Failed to apply refreshed assets:", error);
+            return null;
+        }
+        return result;
     }
 
     _seedAssetRefreshResult(result, projectDir = this.state.projectDir) {
@@ -3893,6 +3904,8 @@ export class EditorNodeController {
         `));
         const gallery = mountSharedAssetGallery(galleryHost, {
             ownerId: `sonder-editor-${this.node?.id ?? "anon"}:dormant-gallery`,
+            // The canvas card's drags land on the ComfyUI graph (extension.js).
+            dropTarget: "graph",
             getProjectDir: () => this.state.projectDir,
             initialData: data || { assets: [], folders: [] },
             formatReferenceTag: () => null,
@@ -3917,14 +3930,21 @@ export class EditorNodeController {
             onOpenSourceWorkflow: async (asset) => {
                 await window.__SONDER_OPEN_SOURCE_WORKFLOW__?.(this.state.projectDir, asset);
             },
-            onRefresh: async () => {
-                await this._refreshAssets({
-                    mode: "sync",
-                    waveId: allocateAssetRefreshWave("dormant_manual_refresh"),
-                    reason: "dormant_manual_refresh",
-                    manual: true,
-                });
-                this.card.syncModuleContainerHeight?.();
+            // `explicit` comes from the Refresh button and menu only; their
+            // failure rejects so the gallery can say so. Implicit refreshes
+            // (after Import, a move, a drop) stay silent as before.
+            onRefresh: async ({ explicit = false } = {}) => {
+                try {
+                    await this._refreshAssets({
+                        mode: "sync",
+                        waveId: allocateAssetRefreshWave("dormant_manual_refresh"),
+                        reason: "dormant_manual_refresh",
+                        manual: true,
+                        rethrow: explicit,
+                    });
+                } finally {
+                    this.card.syncModuleContainerHeight?.();
+                }
             },
             onRequestResize: () => this.card.syncModuleContainerHeight?.(),
             // A detail or search read found the gallery's list older than the asset.

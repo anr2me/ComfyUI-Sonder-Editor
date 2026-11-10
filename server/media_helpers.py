@@ -250,7 +250,8 @@ def _find_ffmpeg() -> str:
 def require_audio_ffmpeg(path: str) -> str:
     """Supported audio floor: FFmpeg 7.0 (libavformat 61), including development builds."""
     try:
-        result = subprocess.run([path, "-version"], capture_output=True, text=True, timeout=10)
+        result = subprocess.run([path, "-version"], capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=10)
         match = re.search(r"libavformat\s+(\d+)\.", result.stdout or "")
         if result.returncode == 0 and match and int(match.group(1)) >= 61:
             return path
@@ -362,11 +363,16 @@ def _duration_from_ffmpeg_text(text: str) -> float:
 
 
 def _run_text_command(cmd: list[str], *, timeout: int | float = 30) -> subprocess.CompletedProcess | None:
+    # ffmpeg/ffprobe write UTF-8. Without an explicit encoding Windows decodes
+    # as cp1252, and a byte cp1252 leaves undefined (a curly quote's 0x9D)
+    # kills the reader thread: the output comes back None and nothing raises.
     try:
         return subprocess.run(
             cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
     except Exception as exc:
@@ -1059,6 +1065,8 @@ def extract_embedded_workflow_metadata(path: str):
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
         )
         if result.returncode == 0:
@@ -1086,6 +1094,8 @@ def extract_embedded_workflow_metadata(path: str):
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
         )
         if result.returncode != 0:
@@ -1344,6 +1354,8 @@ def probe_video_size(path: str) -> tuple[int, int]:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
         )
         if result.returncode == 0:

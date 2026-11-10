@@ -27,6 +27,11 @@ Rows carry badges: a **Scene** marker when the active scene uses the asset,
 a **★ favorite** star, and a **Missing** placeholder when the file is gone
 but the entry survives.
 
+A favorite's ★ also shows on the timeline: in the top-right corner of each clip
+and audio item that uses it, and beside a guide's frame number. An item too
+narrow to fit it shows none. Turn it off with
+**Settings ▸ Appearance ▸ Favorite Stars on Timeline Items**.
+
 **Importing**: the Import button, dropping OS files onto the gallery
 (imports into the hovered folder), or dropping an OS *folder* (imports as a
 gallery folder). Imports are copied into the project folder, so the project
@@ -141,7 +146,7 @@ the same audio isn't stacked on a new lane with every take.
 To keep one take, right-click it and choose **Unmute Selected**, then mute the
 competing takes with **Mute Selected**, or hide their Video lane with the eye at
 the left of the lane. Click **Play** under the preview to check picture and
-sound. A favorite star in **Assets** doesn't change what plays.
+sound. A favorite's ★, in **Assets** or on the timeline, doesn't change what plays.
 
 To switch only the picture and keep the sound, hide the Video lane, or unlink
 the take first ([Linked groups](editor-basics.md#linked-groups)).

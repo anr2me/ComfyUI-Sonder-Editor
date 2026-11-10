@@ -183,7 +183,7 @@ def test_workflow_endpoint_extracts_from_mp4_when_cache_empty(tmp_path, monkeypa
     asset = Asset(asset_id="asset-1", name="source.mp4", asset_type="video", path=os.path.join("media", "source.mp4"))
     project = TimelineProject(project_dir=str(project_dir), name="Project", assets=[asset])
     monkeypatch.setattr(route_module, "_load_project_from_request", lambda request: project)
-    monkeypatch.setattr(route_module, "_extract_video_workflow_metadata", lambda path: workflow)
+    monkeypatch.setattr(route_module, "extract_embedded_workflow_metadata", lambda path: workflow)
 
     handler = _route_handler(route_module, "GET", "/sonder-editor/project/{project_id}/assets/{asset_id}/workflow")
     response = asyncio.run(handler(DummyRequest(match_info={"asset_id": "asset-1"})))
@@ -195,23 +195,29 @@ def test_workflow_endpoint_extracts_from_mp4_when_cache_empty(tmp_path, monkeypa
 
 def test_workflow_video_extraction_falls_back_to_ffmpeg_ffmetadata(monkeypatch):
     route_module = _load_route_module(monkeypatch)
+    # The route delegates to the one media_helpers reader (Phase 4); patch
+    # that module's binaries, since the route keeps no copy of its own.
+    media_module = sys.modules[route_module.extract_embedded_workflow_metadata.__module__]
     workflow = {"nodes": [{"id": 3, "type": "FallbackNode"}]}
     calls = []
 
     def fake_run(cmd, **kwargs):
-        calls.append(list(cmd))
+        calls.append((list(cmd), kwargs))
         if cmd[0] == "missing-ffprobe":
             raise FileNotFoundError("ffprobe")
         stdout = ";FFMETADATA1\nworkflow=" + json.dumps(workflow) + "\n"
         return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
 
-    monkeypatch.setattr(route_module, "get_ffprobe_path", lambda: "missing-ffprobe")
-    monkeypatch.setattr(route_module, "get_ffmpeg_path", lambda: "ffmpeg")
+    monkeypatch.setattr(media_module, "get_ffprobe_path", lambda: "missing-ffprobe")
+    monkeypatch.setattr(media_module, "get_ffmpeg_path", lambda: "ffmpeg")
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    assert route_module._extract_video_workflow_metadata("source.mp4") == workflow
-    assert calls[0][0] == "missing-ffprobe"
-    assert calls[1][0] == "ffmpeg"
+    assert route_module.extract_embedded_workflow_metadata("source.mp4") == workflow
+    assert calls[0][0][0] == "missing-ffprobe"
+    assert calls[1][0][0] == "ffmpeg"
+    for _cmd, kwargs in calls:
+        assert kwargs.get("encoding") == "utf-8"
+        assert kwargs.get("errors") == "replace"
 
 
 def test_clip_post_put_role_validation_and_defaults(tmp_path, monkeypatch):

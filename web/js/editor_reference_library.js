@@ -60,6 +60,9 @@ const css = {
 
 let fieldId = 0;
 export const SONDER_REFERENCE_MIME = "application/x-sonder-reference";
+// Only a Reference lane, the ruler (a new lane) or an existing Reference bar
+// accepts a Library drop; any other lane ignores it.
+export const REFERENCE_DRAG_HINT = "Drag onto a Reference lane, or onto the ruler to add one.";
 
 /** The one rule for which lane kind a Reference member belongs to.
  *
@@ -793,8 +796,10 @@ export function mountReferenceLibrary(container, host) {
             const memberPending = (reference.members || []).some((member) => member?.pendingInert);
             const card = el("section", "", `border:1px solid #303841;border-radius:8px;background:#171d23;margin-bottom:8px;overflow:hidden;${pendingEntity ? "opacity:.6;" : ""}`);
             const header = el("div", "", `display:flex;flex-direction:column;gap:5px;padding:8px;cursor:${pendingEntity ? "default" : "pointer"};`);
-            if (pendingEntity) header.title = "Saving this Reference. It can be opened and used once saved.";
             header.draggable = !pendingEntity && settledMembers(reference).length > 0;
+            // The saving notice wins; the drag hint shows only while the header can be dragged.
+            if (pendingEntity) header.title = "Saving this Reference. It can be opened and used once saved.";
+            else if (header.draggable) header.title = REFERENCE_DRAG_HINT;
             if (!pendingEntity) {
                 header.addEventListener("dragstart", (event) => beginReferenceDrag(
                     event, dragPayload(reference),
@@ -815,6 +820,9 @@ export function mountReferenceLibrary(container, host) {
             if (state.manage && !pendingEntity) {
                 const edit = el("button", "Edit", `${css.button}padding:3px 6px;font-size:9px;`);
                 const remove = el("button", "Delete", `${css.button}padding:3px 6px;font-size:9px;`);
+                // Own titles, so they don't show the header's drag hint.
+                edit.title = "Edit Reference";
+                remove.title = "Delete Reference";
                 edit.addEventListener("click", (event) => {
                     event.stopPropagation();
                     state.entityDraft = createReferenceDraft(reference);
@@ -905,7 +913,8 @@ export function mountReferenceLibrary(container, host) {
                         }
                         const preview = el("button", asset?.asset_type === "audio" ? "Audio" : (asset?.asset_type === "video" ? "Video" : ""), "width:40px;height:34px;padding:0;background:#0b0e12;border:1px solid #333b44;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:8px;color:#8995a0;overflow:hidden;cursor:pointer;");
                         preview.type = "button";
-                        preview.title = "Inspect Reference member";
+                        // The buttons cover most of the row, so they carry its drag hint.
+                        preview.title = `Inspect Reference member. ${REFERENCE_DRAG_HINT}`;
                         const url = host.assetPreviewUrl(asset);
                         if (url && ["image", "video"].includes(asset?.asset_type)) { const img = el("img"); img.src = url; img.alt = ""; img.style.cssText = "width:100%;height:100%;object-fit:cover;"; preview.textContent = ""; preview.appendChild(img); }
                         const info = el("div", "", "min-width:0;");
@@ -915,7 +924,7 @@ export function mountReferenceLibrary(container, host) {
                             ? `${reference.name} · ${member.name}` : reference.name;
                         nameLine.textContent = `${composite} — ${assetName(asset)}${status ? ` · ${status}` : ""}`;
                         nameLine.type = "button";
-                        nameLine.title = "Inspect Reference member";
+                        nameLine.title = `Inspect Reference member. ${REFERENCE_DRAG_HINT}`;
                         const inspectMember = () => {
                             const previewDraft = createMemberDraft(member, asset);
                             previewDraft.has_audio = asset?.has_audio === true;

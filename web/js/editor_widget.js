@@ -1128,6 +1128,10 @@ export class EditorWidget {
         // A forced references fetch that had to defer. The replay needs the
         // ORIGINAL caller's intent; see _replayDeferredProjectBackedRefresh.
         this._deferredReferencesForce = false;
+        // An explicit gallery Refresh that had to defer behind pending edits:
+        // its sync/manual intent and the project it was asked in, replayed once
+        // in place of the plain read (see _replayDeferredProjectBackedRefresh).
+        this._deferredAssetsIntent = null;
         this._referencesLoading = false;
         this._referencesError = "";
         this._referenceFetchSeq = 0;
@@ -1784,6 +1788,8 @@ export class EditorWidget {
         `;
         this._assetGallery = mountSharedAssetGallery(this.assetGrid, {
             ownerId: this._keyboardConsumerId("gallery"),
+            // Fullscreen, Mount in Tab and the Sonder App: drags land on the timeline.
+            dropTarget: "timeline",
             getProjectDir: () => this.projectDir,
             initialData: { assets: [], folders: [] },
             getCurrentSceneAssetIds: () => this._currentSceneAssetIdsForGallery(),
@@ -1819,29 +1825,48 @@ export class EditorWidget {
             onRequestAssetListRefresh: async ({ requiredVersion = "", reason = "gallery_detail_mismatch" } = {}) =>
                 await this._fetchAssets({ mode: "read", requiredVersion, reason }),
             onOpenSourceWorkflow: async (asset) => {
-                const handled = await window.__SONDER_OPEN_SOURCE_WORKFLOW__?.(this.projectDir, asset);
-                if (!handled) this._showToast?.("Source workflow unavailable");
+                // The handler (extension.js) reports every failure itself, on
+                // its own `source-workflow` slot; a second toast here only
+                // duplicated it. Without a handler nothing else would speak.
+                const open = window.__SONDER_OPEN_SOURCE_WORKFLOW__;
+                if (typeof open !== "function") {
+                    notifyWarning("Source workflow unavailable", { source: "source-workflow" });
+                    return;
+                }
+                await open(this.projectDir, asset);
             },
             // Asked when the menu opens: only the ComfyUI page installs the
             // handler, so the mounted tab and the Sonder App show it disabled.
             canOpenSourceWorkflow: () => typeof window.__SONDER_OPEN_SOURCE_WORKFLOW__ === "function",
-            onRefresh: async () => {
+            // `explicit` comes from the gallery's Refresh button and menu only.
+            // Their transport failure rejects (the gallery words it); implicit
+            // refreshes after Import, a move or a drop stay silent.
+            onRefresh: async ({ explicit = false } = {}) => {
                 // Indeterminate progress only when the refresh is slow (>500ms);
                 // a fast refresh stays silent (result is visible inline).
                 let handle = null;
+                let outcome = null;
                 const timer = window.setTimeout(() => {
                     handle = notifyProgress({ verb: "Refreshing", message: "Refreshing assets…", progress: null, source: "refresh" });
                 }, 500);
                 try {
-                    await this._fetchAssets({
+                    outcome = await this._fetchAssets({
                         mode: "sync",
                         manual: true,
                         reason: "gallery_manual_refresh",
+                        rethrow: explicit,
+                        explicit,
                     });
-               } finally {
+                } finally {
                     window.clearTimeout(timer);
-                    if (handle) handle.resolve({ tier: "info", message: "Assets refreshed" });
+                    // "Assets refreshed" only when a list was applied; a failure,
+                    // a project switch or a deferral closes the toast silently.
+                    if (handle) {
+                        if (outcome && !outcome.deferred) handle.resolve({ tier: "info", message: "Assets refreshed" });
+                        else handle.dismiss();
+                    }
                 }
+                if (explicit && outcome?.deferred) this._assetGallery?.noteRefreshPending?.();
             },
         });
 
@@ -2775,17 +2800,28 @@ export class EditorWidget {
         waveId = "",
         requiredVersion = "",
         manual = false,
+        // Rethrow a transport failure, while the project asked for is still
+        // open (an explicit gallery Refresh; the gallery words it).
+        rethrow = false,
+        // An explicit gallery Refresh: a deferral keeps its intent.
+        explicit = false,
     } = {}) {
         if (!this.projectDir) return;
         if (!ignoreMutationGate && this._hasPendingProjectMutations()) {
+            if (explicit) {
+                // Upgrade, never downgrade: the replay runs this sync once,
+                // in place of the plain read, and reports its failure.
+                this._deferredAssetsIntent = { mode: "sync", manual: true, projectDir: this.projectDir };
+            }
             this._deferProjectBackedRefresh(["assets"], reason);
-            return;
+            return { deferred: true };
         }
 
         const projectDir = this.projectDir;
         const dirName = this.projectDir.split(/[/\\]/).pop();
+        let result;
         try {
-            const result = await requestProjectAssetRefresh({
+            result = await requestProjectAssetRefresh({
                 projectId: dirName,
                 mode,
                 waveId: waveId || allocateAssetRefreshWave(reason),
@@ -2795,7 +2831,13 @@ export class EditorWidget {
                 manual,
                 diagnosticRecorder: (event) => sessionDiagRecord(event.kind, event),
             });
-            if (!result || projectDir !== this.projectDir) return null;
+        } catch (e) {
+            console.warn("[Sonder] Failed to fetch assets:", e);
+            if (rethrow && !this._destroyed && projectDir === this.projectDir) throw e;
+            return null;
+        }
+        if (!result || projectDir !== this.projectDir) return null;
+        try {
             this._markStaleReplayApplied("assets", dirName);
             return this._applyAssetPayload(result.payload, {
                 projectDir,
@@ -2803,7 +2845,9 @@ export class EditorWidget {
                 requestId: result.requestId,
             }) ? result : null;
         } catch (e) {
-            console.warn("[Sonder] Failed to fetch assets:", e);
+            // A frontend fault while applying, not a failed refresh: never
+            // reported as "ComfyUI didn't answer".
+            console.warn("[Sonder] Failed to apply assets:", e);
             return null;
         }
     }
@@ -5136,8 +5180,9 @@ export class EditorWidget {
         markProjectAssetMutation(this._projectDirName(), reason);
         // Library names, thumbnails and Trashed badges are asset-backed.
         this._referenceLibraryHandle?.render?.();
-        // Clip and audio labels read the asset's name through `_pathToAsset`.
-        if (Object.values(fieldsById).some((fields) => fields && "name" in fields)) {
+        // Clip and audio labels read the asset's name, and the timeline's
+        // favorite stars its `favorite`, through `_pathToAsset`/`this.assets`.
+        if (Object.values(fieldsById).some((fields) => fields && ("name" in fields || "favorite" in fields))) {
             this._renderTimeline();
         }
     }
@@ -5640,6 +5685,29 @@ export class EditorWidget {
         }
     }
 
+    // Replay deferred assets with the intent they were deferred with: an
+    // explicit Refresh's sync, reported through the gallery if it fails, or
+    // the plain read. A project switch since the click drops the explicit part.
+    async _replayDeferredAssets() {
+        const intent = this._deferredAssetsIntent;
+        this._deferredAssetsIntent = null;
+        if (!intent || intent.projectDir !== this.projectDir) {
+            return await this._fetchAssets({ ignoreMutationGate: true });
+        }
+        try {
+            return await this._fetchAssets({
+                ignoreMutationGate: true,
+                mode: intent.mode,
+                manual: intent.manual,
+                reason: "gallery_manual_refresh_replay",
+                rethrow: true,
+            });
+        } catch (error) {
+            this._assetGallery?.reportRefreshFailure?.(error, intent.projectDir);
+            return null;
+        }
+    }
+
     _replayDeferredProjectBackedRefresh() {
         if (this._destroyed) return;
         if (this._hasPendingProjectMutations()) {
@@ -5669,14 +5737,14 @@ export class EditorWidget {
         const wantsReferences = keys.has("references");
         const wantsPromptContext = keys.has("prompt_context");
         if (wantsAssets && wantsScenes) {
-            this._fetchAssets({ ignoreMutationGate: true }).then(() => {
+            this._replayDeferredAssets().then(() => {
                 if (!this._destroyed) {
                     this._fetchScenes({ ignoreMutationGate: true, reason: "project_mutation_deferred_replay" });
                 }
             });
         } else {
             if (wantsAssets) {
-                this._fetchAssets({ ignoreMutationGate: true });
+                this._replayDeferredAssets();
             }
             if (wantsScenes) {
                 this._fetchScenes({ ignoreMutationGate: true, reason: "project_mutation_deferred_replay" });
@@ -10862,11 +10930,13 @@ export class EditorWidget {
             mode: this._settings?.appearance?.clipLabelMode,
             v: this._settings?.appearance?.clipLabelVerticalAlign,
             h: this._settings?.appearance?.clipLabelHorizontalAlign,
+            stars: this._settings?.appearance?.timelineFavoriteStars !== false,
         });
         const nextClipLabelSignature = JSON.stringify({
             mode: nextSettings?.appearance?.clipLabelMode,
             v: nextSettings?.appearance?.clipLabelVerticalAlign,
             h: nextSettings?.appearance?.clipLabelHorizontalAlign,
+            stars: nextSettings?.appearance?.timelineFavoriteStars !== false,
         });
         const prevSceneOutline = this._settings?.appearance?.sceneOutline !== false;
         const nextSceneOutline = nextSettings?.appearance?.sceneOutline !== false;
@@ -11195,6 +11265,11 @@ export class EditorWidget {
     _clipLabelHorizontalAlign() {
         return this._settings?.appearance?.clipLabelHorizontalAlign
             || DEFAULT_EDITOR_SETTINGS.appearance.clipLabelHorizontalAlign;
+    }
+
+    // Settings ▸ Appearance ▸ "Favorite Stars on Timeline Items".
+    _timelineFavoriteStarsEnabled() {
+        return this._settings?.appearance?.timelineFavoriteStars !== false;
     }
 
     _defaultNewSceneDuration() {
@@ -24067,6 +24142,11 @@ export class EditorWidget {
             background: ${COLORS.bg}; display: none;
             flex-direction: column;
         `;
+        // The sidebar (gallery, Library) moves in here, outside `this.container`.
+        // Without the marker, an asset dropped on a sidebar text field (which
+        // accepts drops by default) reached the graph interceptor and created
+        // a loader on the hidden graph (extension.js; Phase 4, 2026-11).
+        overlay.dataset.sonderEditor = "1";
         applyNativeControlTheme(overlay);
 
         // Toolbar

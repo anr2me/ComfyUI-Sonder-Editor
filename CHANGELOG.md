@@ -13,6 +13,8 @@ a fresh `[Unreleased]` block.
 
 ### Added
 - Right-click a staged Reference item and choose **Set Reference to Selection** to give it the current In–Out range, as one Undo step. A range that reaches the scene end keeps following it. The entry is greyed out until both In and Out are set, and on a locked lane; a range that would overlap another item on the lane is refused.
+- Timeline items whose asset is a favorite show a ★: in the top-right corner of clips and audio, and beside a guide's frame number, in every timeline. It marks your curation only and doesn't change what plays. Turn it off under **Settings ▸ Appearance ▸ Favorite Stars on Timeline Items**.
+- Reference Library rows now say where they can be dropped: on a Reference lane, or on the ruler to add one.
 
 ### Changed
 - Reference names now say which member they mean, as Reference · Member (for example **Prop · Sonder**), wherever a Reference item is listed or labelled:
@@ -32,6 +34,11 @@ a fresh `[Unreleased]` block.
 - Dragging a guide that sits at the scene end now starts from where it is shown, instead of jumping to the start of the scene. A linked partner moves by the same distance.
 - Duplicating a scene keeps its linked clips and audio linked in the copy, as links of its own, and keeps any clip or audio settings saved by a newer Sonder version.
 - A refused scene FPS change now says why. With render jobs queued or running for the scene, it says to try again once they finish or are removed from the Render Queue; when the new rate would make the scene longer than 99,999 frames, it names the limit and suggests a lower FPS or a shorter scene. Either way the FPS control returns to the scene's rate.
+- In the editor, Assets rows say where a drag lands: a matching lane or the ruler for video and audio, a guide frame for an image. They used to point at the graph, which only the canvas card's gallery drops onto.
+- A Refresh in Assets that fails now says so and offers Retry, and the list you had stays. A slow failure no longer reports **Assets refreshed**. With edits still saving, Refresh says it will run once they have saved, then does.
+- On Windows, a curly quote or certain other characters (such as Á, or Cyrillic letters) in a file's embedded metadata no longer make Sonder read it as empty. Open Source Workflow loads such a take's workflow, and a new take is saved with it.
+- Open Source Workflow shows one notice when a workflow can't be opened, not two.
+- In the editor, dropping an asset on a text field in the sidebar, such as the Assets search box, no longer adds a loader node to the hidden graph behind the editor.
 
 ## [0.8.3] - 2026-11-05
 

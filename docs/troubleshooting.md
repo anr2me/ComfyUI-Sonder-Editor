@@ -83,6 +83,13 @@ this is usually the 260-character path limit, which the message calls out when
 it can detect it: move or rename the project so its folder path is shorter, or
 enable long-path support in Windows, then export again.
 
+### A take's workflow reads *Not embedded* and **Open Source Workflow** is greyed out
+
+On Windows, older Sonder versions could miss the workflow saved inside a take
+whose prompt held a curly quote, an accented letter such as Á, or Cyrillic. The file still
+holds the workflow: drag the take's file from the project's `media` folder onto
+the ComfyUI canvas to open it.
+
 ### I can't link a project on another drive or a UNC share
 
 Enable **Settings ▸ Server ▸ Allow External Project Links** first, then use

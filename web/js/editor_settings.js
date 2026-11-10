@@ -384,6 +384,8 @@ export const DEFAULT_EDITOR_SETTINGS = {
         clipLabelMode: "name_duration",
         clipLabelVerticalAlign: "middle",
         clipLabelHorizontalAlign: "start",
+        // A ★ on clips, audio and guides whose asset is a favorite.
+        timelineFavoriteStars: true,
         sceneOutline: true,
         laneTintOverrides: {
             video: "",
@@ -1448,6 +1450,9 @@ export function normalizeEditorSettings(source = null) {
             clipLabelHorizontalAlign: VALID_CLIP_LABEL_HORIZONTAL_ALIGNS.has(stored?.appearance?.clipLabelHorizontalAlign)
                 ? stored.appearance.clipLabelHorizontalAlign
                 : defaults.appearance.clipLabelHorizontalAlign,
+            timelineFavoriteStars: stored?.appearance?.timelineFavoriteStars == null
+                ? defaults.appearance.timelineFavoriteStars
+                : !!stored.appearance.timelineFavoriteStars,
             sceneOutline: stored?.appearance?.sceneOutline == null
                 ? defaults.appearance.sceneOutline
                 : !!stored.appearance.sceneOutline,

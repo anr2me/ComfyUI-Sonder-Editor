@@ -285,6 +285,7 @@ function syncSettingsPanelControls() {
     if (controls.clipLabelMode) controls.clipLabelMode.value = this._settings.appearance.clipLabelMode;
     if (controls.clipLabelVerticalAlign) controls.clipLabelVerticalAlign.value = this._settings.appearance.clipLabelVerticalAlign;
     if (controls.clipLabelHorizontalAlign) controls.clipLabelHorizontalAlign.value = this._settings.appearance.clipLabelHorizontalAlign;
+    if (controls.timelineFavoriteStars) controls.timelineFavoriteStars.checked = this._settings.appearance.timelineFavoriteStars !== false;
     if (controls.sceneOutline) controls.sceneOutline.checked = this._settings.appearance.sceneOutline !== false;
     for (const tintKey of VARIABLE_TRACK_TYPES) {
         const tintInput = controls[`laneTintOverride_${tintKey}`];
@@ -2109,6 +2110,15 @@ function showSettingsPanel() {
         CLIP_LABEL_HORIZONTAL_ALIGN_OPTIONS,
         () => this._settings.appearance.clipLabelHorizontalAlign,
         (value) => updateCategory("appearance", "clipLabelHorizontalAlign", value)
+    );
+
+    createCheckbox(
+        appearanceSection,
+        "timelineFavoriteStars",
+        "Favorite Stars on Timeline Items",
+        "Show a star on clips, audio and guides whose asset is a favorite. It marks curation only; it doesn't change what plays.",
+        () => this._settings.appearance.timelineFavoriteStars !== false,
+        (checked) => updateCategory("appearance", "timelineFavoriteStars", checked)
     );
 
     createCheckbox(
