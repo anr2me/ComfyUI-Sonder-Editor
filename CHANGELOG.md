@@ -11,6 +11,8 @@ a fresh `[Unreleased]` block.
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-11-10
+
 ### Added
 - Right-click a staged Reference item and choose **Set Reference to Selection** to give it the current In–Out range.
 - Timeline items whose asset is a favorite show a ★. Turn it off under **Settings ▸ Appearance ▸ Favorite Stars on Timeline Items**.
