@@ -67,8 +67,31 @@ def _import_io_nodes(tmp_path, monkeypatch):
     return module
 
 
+def drain_frame_stream(frames_iter, expected_frame_count=None):
+    """Consume what Save/Preview hand the encoder, as the real encoder does.
+
+    A fake that ignores its frames would pass every node test with a broken
+    stream, so every fake encoder drains through here. Save and Preview stream
+    their frames; a whole array means they regressed to the full uint8 copy.
+    """
+    import numpy as np
+
+    assert not isinstance(frames_iter, np.ndarray), "Save/Preview must stream frames, not pass a whole array"
+    assert expected_frame_count and expected_frame_count > 0, "a frame stream needs expected_frame_count"
+    count, shape = 0, None
+    for frame in frames_iter:
+        assert isinstance(frame, np.ndarray) and frame.dtype == np.uint8
+        assert frame.ndim == 3 and frame.shape[-1] == 3
+        shape = shape or frame.shape
+        assert frame.shape == shape
+        count += 1
+    assert count == expected_frame_count
+    return count
+
+
 def _fake_encode_video_success(io_nodes, calls=None):
     def fake_encode_video(frames_iter, *, preset_id, output_path, fps, audio_path=None, custom_options=None, timeout=90, **kwargs):
+        drain_frame_stream(frames_iter, kwargs.get("expected_frame_count"))
         Path(output_path).write_bytes(b"video")
         if audio_path and kwargs.get("audio_sidecar_path"):
             import shutil

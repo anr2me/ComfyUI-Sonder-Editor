@@ -54,6 +54,7 @@ from ..server.prompt_graph import downstream_set
 from ..server.color_correction import (
     COLOR_DRIFT_METADATA_KEY,
     fit_drift_correction,
+    iter_transform_tensor_to_uint8_frames,
     transform_tensor_to_uint8_frames,
 )
 from ..server.guide_collision import check_frame_count_excess
@@ -82,6 +83,8 @@ from ..server.media_helpers import (
     discard_audio_file,
     extract_embedded_workflow_metadata,
     get_ffmpeg_path,
+    image_batch_geometry,
+    iter_tensor_to_uint8_frames,
     metadata_for_save_preset,
     normalize_save_preset,
     output_extension_for_custom_options,
@@ -2262,6 +2265,14 @@ def _frames_to_tensor(frames: list[np.ndarray]) -> torch.Tensor:
     return torch.from_numpy(arr)
 
 
+def _first_frame(stream) -> np.ndarray:
+    """Frame 0 of a conversion stream, converting nothing after it."""
+    try:
+        return next(stream)
+    finally:
+        stream.close()
+
+
 def _tensor_to_frames(tensor: torch.Tensor) -> list[np.ndarray]:
     """Convert (N, H, W, 3) float32 RGB tensor to list of BGR uint8 frames."""
     arr = tensor_to_uint8_frames(tensor, mode="truncate")
@@ -2421,8 +2432,9 @@ class SonderSaveVideo:
         tensor_mode = custom_spec["tensor_mode"] if custom_spec else tensor_mode_for_preset(preset_id)
         execution_context = _copy_execution_context(project)
         # Drift correction fits on the mask-protected context frames the editor
-        # stashed and applies fused into the uint8 conversion; `frames` itself is
-        # never mutated (ComfyUI caches node outputs).
+        # stashed and applies fused into the per-frame uint8 conversion that
+        # streams into the encoder; `frames` itself is never mutated or copied
+        # whole (ComfyUI caches node outputs).
         drift_correction, drift_record = fit_drift_correction(
             frames, execution_context, enabled=bool(color_drift_correction)
         )
@@ -2434,19 +2446,23 @@ class SonderSaveVideo:
                 drift_record["residual_before"]["mae"],
                 drift_record["residual_after"]["mae"],
             )
-            rgb_frames = transform_tensor_to_uint8_frames(frames, drift_correction, mode=tensor_mode)
-        else:
-            if bool(color_drift_correction):
-                logger.info("color drift correction skipped: %s", drift_record.get("skip_reason"))
-            rgb_frames = tensor_to_uint8_frames(frames, mode=tensor_mode)
+        elif bool(color_drift_correction):
+            logger.info("color drift correction skipped: %s", drift_record.get("skip_reason"))
+        # A batch that is not (N, H, W, 3) fails here, before any output or temp file is written.
+        total_frames, h, w = image_batch_geometry(frames)
+
+        def frame_stream():
+            # Converts one frame at a time, correction included, for the encoder
+            # and for the poster; nothing holds the whole uint8 batch.
+            return iter_transform_tensor_to_uint8_frames(frames, drift_correction, mode=tensor_mode)
+
         _record_guide_bleed_if_needed(
             _guide_bleed_check_from_context(
                 execution_context, str(getattr(project, "project_id", "") or "")
             ),
-            len(rgb_frames),
+            total_frames,
             "save_video_tensor",
         )
-        h, w = rgb_frames[0].shape[:2]
         workflow = _workflow_from_extra_pnginfo(extra_pnginfo)
         embed_metadata_enabled = bool(embed_metadata)
 
@@ -2491,6 +2507,8 @@ class SonderSaveVideo:
             asset_metadata.update(asset_only)
             # A lone surrogate in the run's text never reaches durable data.
             asset_metadata = json_text_scrub(asset_metadata)
+            # PNG writing needs every frame as an array; only this branch builds one.
+            rgb_frames = transform_tensor_to_uint8_frames(frames, drift_correction, mode=tensor_mode)
             output_path, png_assets = _save_custom_png_sequence(
                 project,
                 rgb_frames,
@@ -2532,7 +2550,7 @@ class SonderSaveVideo:
         has_audio = bool(audio_tmp) and not (custom_spec and custom_spec["audio_codec"] == "none")
         encode_timeout = save_video_encode_timeout_seconds(
             preset_id,
-            len(rgb_frames),
+            total_frames,
             w,
             h,
             custom_options if custom_spec else None,
@@ -2547,7 +2565,7 @@ class SonderSaveVideo:
             "ffmpeg start: save_video output=%s preset=%s frames=%d audio=%s timeout=%ss",
             output_path,
             preset_id,
-            len(rgb_frames),
+            total_frames,
             has_audio,
             encode_timeout,
         )
@@ -2557,17 +2575,18 @@ class SonderSaveVideo:
         encode_pbar = None
         try:
             import comfy.utils
-            encode_pbar = comfy.utils.ProgressBar(len(rgb_frames))
+            encode_pbar = comfy.utils.ProgressBar(total_frames)
         except Exception:
             encode_pbar = None
         encode_progress_cb = None
         if encode_pbar is not None:
-            _encode_total = len(rgb_frames)
+            _encode_total = total_frames
             encode_progress_cb = lambda done: encode_pbar.update_absolute(min(int(done), _encode_total))
         _note_run_stage(prompt, unique_id, "encoding")
         try:
             encode_metadata = encode_video(
-                rgb_frames,
+                frame_stream(),
+                expected_frame_count=total_frames,
                 preset_id=preset_id,
                 output_path=output_path,
                 fps=fps,
@@ -2613,7 +2632,6 @@ class SonderSaveVideo:
         asset_generation_params = json_text_scrub(asset_generation_params)
 
         # Auto-register as a project asset
-        total_frames = len(rgb_frames)
         asset = Asset(
             name=output_filename,
             asset_type="video",
@@ -2795,10 +2813,10 @@ class SonderSaveVideo:
         # ComfyUI /view from <output>/sonder-projects/<dir>/media. Poster is the first
         # frame shown before playback starts. PNG-sequence saves keep the thumbnail-only
         # path above; this is the playable-video case.
-        poster = _save_preview_thumbnail(cv2.cvtColor(rgb_frames[0], cv2.COLOR_RGB2BGR), "sonder_savevid")
+        poster = _save_preview_thumbnail(cv2.cvtColor(_first_frame(frame_stream()), cv2.COLOR_RGB2BGR), "sonder_savevid")
         project_subfolder = f"sonder-projects/{os.path.basename(os.path.normpath(project.project_dir))}/media"
 
-        logger.info("Saved video to %s (%d frames, %.1f fps, preset=%s)", output_path, len(rgb_frames), fps, preset_id)
+        logger.info("Saved video to %s (%d frames, %.1f fps, preset=%s)", output_path, total_frames, fps, preset_id)
         return {
             "ui": {
                 "sonder_video": [{
@@ -2933,8 +2951,13 @@ class SonderPreviewVideo:
         preview_filename = f"sonder_preview_{uuid.uuid4().hex[:8]}{extension}"
         preview_path = os.path.join(temp_dir, preview_filename)
 
-        rgb_frames = tensor_to_uint8_frames(frames, mode=tensor_mode_for_preset(preset_id))
-        h, w = rgb_frames[0].shape[:2]
+        tensor_mode = tensor_mode_for_preset(preset_id)
+        # A batch that is not (N, H, W, 3) fails here, before any output or temp file is written.
+        total_frames, h, w = image_batch_geometry(frames)
+
+        def frame_stream():
+            # Converts one frame at a time for the encoder and the poster.
+            return iter_tensor_to_uint8_frames(frames, mode=tensor_mode)
 
         audio_tmp = None
         audio_alerts = []
@@ -2949,18 +2972,19 @@ class SonderPreviewVideo:
                 audio_tmp = None
         has_audio = bool(audio_tmp)
 
-        encode_timeout = save_video_encode_timeout_seconds(preset_id, len(rgb_frames), w, h)
+        encode_timeout = save_video_encode_timeout_seconds(preset_id, total_frames, w, h)
         ffmpeg_started_at = time.perf_counter()
         logger.info(
             "ffmpeg start: preview output=%s frames=%d audio=%s timeout=%ss",
             preview_path,
-            len(rgb_frames),
+            total_frames,
             has_audio,
             encode_timeout,
         )
         try:
             encode_metadata = encode_video(
-                rgb_frames,
+                frame_stream(),
+                expected_frame_count=total_frames,
                 preset_id=preset_id,
                 output_path=preview_path,
                 fps=fps,
@@ -2988,7 +3012,7 @@ class SonderPreviewVideo:
         audio_alerts.extend(encode_metadata.get("alerts") or [])
 
         # First-frame poster for the inline player (shown before playback starts).
-        poster = _save_preview_thumbnail(cv2.cvtColor(rgb_frames[0], cv2.COLOR_RGB2BGR), "sonder_preview")
+        poster = _save_preview_thumbnail(cv2.cvtColor(_first_frame(frame_stream()), cv2.COLOR_RGB2BGR), "sonder_preview")
 
         return {"ui": {
             "sonder_video": [{

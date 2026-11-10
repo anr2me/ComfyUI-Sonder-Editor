@@ -221,28 +221,62 @@ def transform_tensor_to_uint8_frames(tensor, correction, *, mode: str = "truncat
     ComfyUI caches node outputs, so an in-place correction would double-apply
     on re-runs and leak into parallel consumers.
     """
-    from .media_helpers import tensor_to_uint8_frames
+    from .media_helpers import check_tensor_conversion_mode, tensor_to_uint8_frames
 
-    if mode not in ("round", "truncate"):
-        raise ValueError(f"Unknown tensor conversion mode: {mode}")
+    check_tensor_conversion_mode(mode)
     if correction is None:
         return tensor_to_uint8_frames(tensor, mode=mode)
 
-    batch = _as_cpu_array(tensor)
-    if len(batch.shape) != 4 or batch.shape[-1] != 3:
-        raise ValueError(f"expected (N,H,W,3) image batch, got shape {tuple(batch.shape)}")
+    stream = iter_transform_tensor_to_uint8_frames(tensor, correction, mode=mode)
+    out = np.empty(tuple(np.shape(tensor)), dtype=np.uint8)
+    for i, frame in enumerate(stream):
+        out[i] = frame
+    return out
+
+
+def iter_transform_tensor_to_uint8_frames(tensor, correction, *, mode: str = "truncate"):
+    """Yield `transform_tensor_to_uint8_frames` output one frame at a time.
+
+    The mode and, with a correction, the `(N, H, W, 3)` shape are checked now,
+    not on first use. Each frame moves to the CPU alone, so a GPU batch is never
+    copied whole, and each yielded frame is a fresh array. NEVER mutates the
+    input tensor.
+    """
+    from .media_helpers import check_tensor_conversion_mode, iter_tensor_to_uint8_frames
+
+    check_tensor_conversion_mode(mode)
+    if correction is None:
+        return iter_tensor_to_uint8_frames(tensor, mode=mode)
+    shape = tuple(int(v) for v in np.shape(tensor))
+    if len(shape) != 4 or shape[-1] != 3:
+        raise ValueError(f"expected (N,H,W,3) image batch, got shape {shape}")
     if isinstance(correction, np.ndarray):
         correction = np.asarray(correction, dtype=np.float64)
+    return _iter_transformed_frames(tensor, shape[0], correction, mode)
 
-    out = np.empty(tuple(batch.shape), dtype=np.uint8)
-    for i in range(batch.shape[0]):
+
+def _iter_transformed_frames(tensor, frame_count: int, correction, mode: str):
+    # Same operations as the former per-frame body (cast to float32, x255,
+    # cv2.transform, rint, clip, uint8), written into two scratch frames owned
+    # here so a frame costs no temporaries. The scratch is never the input, and
+    # each yielded frame is a fresh array.
+    from .media_helpers import _frame_to_numpy
+
+    scaled = transformed = None
+    for i in range(frame_count):
         affine = np.asarray(_affine_for_frame(correction, i), dtype=np.float64)
-        frame = np.ascontiguousarray(np.asarray(batch[i], dtype=np.float32) * 255.0)
-        frame = cv2.transform(frame, affine)
+        source = _frame_to_numpy(tensor[i])
+        if scaled is None or scaled.shape != source.shape:
+            scaled = np.empty(source.shape, dtype=np.float32)
+            transformed = np.empty(source.shape, dtype=np.float32)
+        np.copyto(scaled, source, casting="unsafe")
+        np.multiply(scaled, np.float32(255.0), out=scaled)
+        # A binding that cannot reuse `dst` returns a new array instead.
+        transformed = cv2.transform(scaled, affine, dst=transformed)
         if mode == "round":
-            frame = np.rint(frame)
-        out[i] = frame.clip(0, 255).astype(np.uint8)
-    return out
+            np.rint(transformed, out=transformed)
+        np.clip(transformed, 0, 255, out=transformed)
+        yield transformed.astype(np.uint8)
 
 
 # ---------------------------------------------------------------------------

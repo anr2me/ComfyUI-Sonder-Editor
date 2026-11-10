@@ -1209,14 +1209,80 @@ def save_video_encode_timeout_seconds(
     )
 
 
-def tensor_to_uint8_frames(tensor, *, mode: str = "truncate") -> np.ndarray:
-    arr = tensor.detach().cpu().numpy() if hasattr(tensor, "detach") else np.asarray(tensor)
-    scaled = np.asarray(arr, dtype=np.float32) * 255.0
-    if mode == "round":
-        scaled = np.rint(scaled)
-    elif mode != "truncate":
+TENSOR_CONVERSION_MODES = ("round", "truncate")
+
+
+def check_tensor_conversion_mode(mode: str) -> None:
+    if mode not in TENSOR_CONVERSION_MODES:
         raise ValueError(f"Unknown tensor conversion mode: {mode}")
-    return scaled.clip(0, 255).astype(np.uint8)
+
+
+def _batch_shape(tensor) -> tuple[int, ...]:
+    shape = getattr(tensor, "shape", None)
+    return tuple(int(v) for v in (shape if shape is not None else np.shape(tensor)))
+
+
+def image_batch_geometry(tensor) -> tuple[int, int, int]:
+    """`(frame_count, height, width)` of an IMAGE batch, read from its shape alone."""
+    shape = _batch_shape(tensor)
+    if len(shape) != 4 or shape[-1] != 3 or min(shape[:3]) <= 0:
+        raise ValueError(
+            "Expected an IMAGE batch of one or more RGB frames shaped "
+            f"(frames, height, width, 3); received shape {shape}"
+        )
+    return shape[0], shape[1], shape[2]
+
+
+def _frame_to_numpy(frame) -> np.ndarray:
+    # One frame at a time: a GPU batch is never moved, cast or copied whole.
+    return frame.detach().cpu().numpy() if hasattr(frame, "detach") else np.asarray(frame)
+
+
+def _iter_uint8_frames(tensor, mode: str) -> Iterator[np.ndarray]:
+    # `scratch` is owned here and is never the input (ComfyUI caches node
+    # outputs, so the input must not be written). Every yielded frame is a fresh
+    # array: `_non_array_frame_stream` holds frame 0 while the next is produced.
+    scratch = None
+    for index in range(_batch_shape(tensor)[0]):
+        frame = _frame_to_numpy(tensor[index])
+        if scratch is None or scratch.shape != frame.shape:
+            scratch = np.empty(frame.shape, dtype=np.float32)
+        if frame.dtype == np.float32:
+            np.multiply(frame, np.float32(255.0), out=scratch)
+        else:
+            # Cast first, then scale in float32: scaling float64 and casting
+            # after would round twice and differ from the whole-batch formula.
+            np.copyto(scratch, frame, casting="unsafe")
+            np.multiply(scratch, np.float32(255.0), out=scratch)
+        if mode == "round":
+            np.rint(scratch, out=scratch)
+        np.clip(scratch, 0, 255, out=scratch)
+        yield scratch.astype(np.uint8)
+
+
+def iter_tensor_to_uint8_frames(tensor, *, mode: str = "truncate") -> Iterator[np.ndarray]:
+    """Yield `tensor_to_uint8_frames` output one frame at a time over the first axis.
+
+    The mode is checked now, not on first use. The channel count is not
+    checked; `image_batch_geometry` is the gate for IMAGE batches.
+    """
+    check_tensor_conversion_mode(mode)
+    return _iter_uint8_frames(tensor, mode)
+
+
+def tensor_to_uint8_frames(tensor, *, mode: str = "truncate") -> np.ndarray:
+    check_tensor_conversion_mode(mode)
+    shape = _batch_shape(tensor)
+    if len(shape) < 2:
+        arr = tensor.detach().cpu().numpy() if hasattr(tensor, "detach") else np.asarray(tensor)
+        scaled = np.asarray(arr, dtype=np.float32) * 255.0
+        if mode == "round":
+            scaled = np.rint(scaled)
+        return scaled.clip(0, 255).astype(np.uint8)
+    out = np.empty(shape, dtype=np.uint8)
+    for index, frame in enumerate(_iter_uint8_frames(tensor, mode)):
+        out[index] = frame
+    return out
 
 
 # Per-item fit-mode vocabulary (shared with timeline_state defaults / routes validation).

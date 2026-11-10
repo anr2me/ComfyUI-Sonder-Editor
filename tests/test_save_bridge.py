@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from test_editor_node import drain_frame_stream
+
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_PACKAGE = "video_editor_testpkg"
@@ -1068,6 +1070,7 @@ def test_save_video_sanitizes_prefix_to_project_media(tmp_path, monkeypatch):
     torch = importlib.import_module("torch")
 
     def fake_encode(_frames, *, output_path, preset_id, custom_options=None, **_kwargs):
+        drain_frame_stream(_frames, _kwargs.get("expected_frame_count"))
         Path(output_path).write_bytes(b"video")
         return io_nodes.metadata_for_save_preset(preset_id, custom_options)
 

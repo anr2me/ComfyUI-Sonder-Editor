@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from test_editor_node import drain_frame_stream
+
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_PACKAGE = "video_editor_testpkg"
@@ -51,6 +53,7 @@ def _project(tmp_path, with_scene=False):
 
 def _fake_encode(io_nodes, calls):
     def fake(frames_iter, *, preset_id, output_path, fps, audio_path=None, custom_options=None, timeout=90, embed_metadata=None, **_kwargs):
+        drain_frame_stream(frames_iter, _kwargs.get("expected_frame_count"))
         Path(output_path).write_bytes(b"video")
         calls.append({"embed_metadata": embed_metadata, "output_path": output_path})
         return io_nodes.metadata_for_save_preset(preset_id, custom_options)
