@@ -399,8 +399,7 @@ To choose the task types yourself instead, click **Customize** under
 
 A **Subject** names reusable content: a person, place, outfit or style. It
 can draw on several Library members. A **Picture** source names the image
-itself, such as a composition anchor. The source list shows each staged member
-once, by its Reference and member name (**Picture: Prop · Sonder**). For a character taken from a picture,
+itself, such as a composition anchor. For a character taken from a picture,
 attach a Subject and select that picture as its source.
 
 To create a Subject while attaching a chip:
@@ -443,8 +442,8 @@ Empty optional fields can stay empty; address the fields named by advisories.
 A chip can name a Reference that doesn't win the current window — its lane is
 muted or hidden, its item is superseded, below threshold, or simply outside.
 The render still goes ahead, and the chip raises an advisory instead of
-blocking the job. A deleted source doesn't block it either; see the next
-section.
+blocking the job. A deleted source doesn't block it either; see
+[When a Reference source is deleted](#when-a-reference-source-is-deleted).
 
 What becomes of the chip's own authored text is a policy you choose:
 
@@ -465,15 +464,10 @@ the two halves free to differ.
 Deleting a Library member, a Reference or a staged item doesn't stop
 generation. A chip that names it leaves that part out of the prompt and keeps
 the rest; a chip with nothing left is left out whole. In Prompt Management the
-chip shows **Source removed**, or a count such as **1 source removed** when it
-still names others. Adding the scene to the Render Queue shows one warning that
-names the chips, and so does each run.
+chip is marked **Source removed**.
 
 Whether the run still works without that Reference is up to the nodes in your
-graph. To fix the chip, open it and choose another source, or remove it.
-
-A Subject chip whose member was deleted isn't marked: the Subject keeps its
-description and loses only that picture.
+graph.
 
 ### Mentions
 
@@ -541,9 +535,7 @@ Each Bridge exposes 16 numbered outputs:
 
 Slot order follows staged member order, and lanes concatenate in lane-index
 order. Non-slot assemblies emit one payload per lane; slot recipes emit one
-member per output. Each output's label names what it carries, such as
-`r01 · Picture 1 · Prop · Sonder`: the prompt label, then the Reference and
-member.
+member per output.
 
 An inactive earlier lane leaves its outputs reading `(unused)`; later lanes
 keep their socket positions. Each selected lane reserves enough outputs for

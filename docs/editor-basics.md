@@ -129,10 +129,8 @@ double-click isolates one item and opens its inline editor (start, opacity,
 visibility, fit mode). Drag moves and edge-drag trims; to trim a very narrow
 clip, zoom in first.
 
-Drop a clip on another clip to swap them. On the same lane they trade places
-within the space they already cover; on another lane each takes the other's
-place. If the swap would overlap a third item, or the other clip is locked or
-linked, nothing is swapped.
+Drop a clip on another clip to swap them. A locked or linked clip can't be
+swapped.
 
 Each clip has a **fit mode** for when its aspect ratio differs from the
 scene: *Fit (black bars)*, *Fit (edge pad)* (default — pads by replicating

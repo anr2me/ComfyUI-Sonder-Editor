@@ -85,10 +85,12 @@ enable long-path support in Windows, then export again.
 
 ### A take's workflow reads *Not embedded* and **Open Source Workflow** is greyed out
 
-On Windows, older Sonder versions could miss the workflow saved inside a take
-whose prompt held a curly quote, an accented letter such as Á, or Cyrillic. The file still
-holds the workflow: drag the take's file from the project's `media` folder onto
-the ComfyUI canvas to open it.
+A take generated in the Sonder App always reads this way.
+
+A take generated on the canvas on Windows reads this way if an earlier Sonder
+version saved it and its prompt held a curly quote, certain accented letters
+such as Á, or Cyrillic. Drag the take's file from the project's `media` folder
+onto the ComfyUI canvas to open its workflow.
 
 ### I can't link a project on another drive or a UNC share
 

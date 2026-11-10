@@ -12,34 +12,26 @@ a fresh `[Unreleased]` block.
 ## [Unreleased]
 
 ### Added
-- Right-click a staged Reference item and choose **Set Reference to Selection** to give it the current In–Out range, as one Undo step. A range that reaches the scene end keeps following it. The entry is greyed out until both In and Out are set, and on a locked lane; a range that would overlap another item on the lane is refused.
-- Timeline items whose asset is a favorite show a ★: in the top-right corner of clips and audio, and beside a guide's frame number, in every timeline. It marks your curation only and doesn't change what plays. Turn it off under **Settings ▸ Appearance ▸ Favorite Stars on Timeline Items**.
-- Reference Library rows now say where they can be dropped: on a Reference lane, or on the ruler to add one.
+- Right-click a staged Reference item and choose **Set Reference to Selection** to give it the current In–Out range.
+- Timeline items whose asset is a favorite show a ★. Turn it off under **Settings ▸ Appearance ▸ Favorite Stars on Timeline Items**.
 
 ### Changed
-- Reference names now say which member they mean, as Reference · Member (for example **Prop · Sonder**), wherever a Reference item is listed or labelled:
-  - Reference lane bars group members under their Reference (**Cowboy · Cowboy Character Sheet + Prop · Weapon_Sheet, Sonder**).
-  - The Attach source list shows each staged member once (**Picture: Prop · Sonder**). It adds **in 2 slots** when two items in the window carry the same member.
-  - Reference Bridge output labels name the member instead of the Reference's subject or context class (`r01 · Picture 1 · Prop · Sonder`). A saved workflow shows the new labels the next time its Bridge refreshes.
-
-  Members of one Reference that share a name are told apart by their @handle or a number.
-- **Save Video** and **Preview Video** use much less memory. They convert frames for ffmpeg one at a time instead of copying the whole batch first, so encoding starts right away and the save no longer needs about two extra copies of the clip's size in RAM. A Custom PNG Sequence save also peaks lower. The saved frames are unchanged.
-- Deleting a Library member, a Reference or a staged Reference item no longer stops generation. A chip that names it leaves that part out of the prompt and keeps the rest; a chip with nothing left is left out whole. In Prompt Management the chip shows **Source removed**, or a count such as **1 source removed** when it still names others. Adding to the Render Queue shows one warning naming the chips, and so does each run. Whether the run can still work without that Reference is up to the nodes in your graph. A typed `@picture(…)`-style reference to a deleted source leaves out the line it is on.
+- Reference names say which member they mean, as Reference · Member (for example **Prop · Sonder**), on Reference lane bars, in the Attach source list and on Reference Bridge outputs. A saved workflow shows the new Bridge labels the next time its Bridge refreshes.
+- **Save Video** and **Preview Video** use much less memory: they convert frames for ffmpeg one at a time instead of copying the whole batch first, so encoding starts right away. A Custom PNG Sequence save also peaks lower. The saved frames are unchanged.
+- Deleting a Library member, a Reference or a staged Reference item no longer stops generation. A chip that names it leaves that part out of the prompt and is marked **Source removed** in Prompt Management; a typed `@picture(…)`-style reference to it leaves out its line. Whether the run works without that Reference is up to your graph.
 
 ### Fixed
-- Reference Lane Setup now focuses the first unsupported role when it opens, not the last. An unsupported recipe value no longer takes focus ahead of a role above it.
-- Keyboard focus is kept when you switch the Template in Reference Lane Setup. Leaving the select with Tab lands on the control you tabbed to, or back on the Template select if that control is gone. A panel refresh no longer drops focus from a button.
-- When a Subject chip and a Picture chip send the same member's text, the Picture chip now shows an advisory naming the member: untick **Definition** under **Prompt parts and routing** to send it once. The advisory used to miss this case, and its advice to blank a field brought the text back.
-- Clicking a timeline item too narrow to show its middle selects it, and Ctrl- or Shift-click adds it to the selection. A narrow item keeps a middle you can drag to move it; zoom in to trim one. Grabbing an edge and letting go without moving it no longer saves anything or adds an Undo step.
-- Dropping a clip on another clip of a different length no longer leaves them overlapping. On one lane the two trade places within the space they already cover; across lanes a swap that would land on another item is refused, and the drag stays where it last fit. A linked or locked clip is no longer swapped.
-- Dragging a guide that sits at the scene end now starts from where it is shown, instead of jumping to the start of the scene. A linked partner moves by the same distance.
-- Duplicating a scene keeps its linked clips and audio linked in the copy, as links of its own, and keeps any clip or audio settings saved by a newer Sonder version.
-- A refused scene FPS change now says why. With render jobs queued or running for the scene, it says to try again once they finish or are removed from the Render Queue; when the new rate would make the scene longer than 99,999 frames, it names the limit and suggests a lower FPS or a shorter scene. Either way the FPS control returns to the scene's rate.
-- In the editor, Assets rows say where a drag lands: a matching lane or the ruler for video and audio, a guide frame for an image. They used to point at the graph, which only the canvas card's gallery drops onto.
-- A Refresh in Assets that fails now says so and offers Retry, and the list you had stays. A slow failure no longer reports **Assets refreshed**. With edits still saving, Refresh says it will run once they have saved, then does.
-- On Windows, a curly quote or certain other characters (such as Á, or Cyrillic letters) in a file's embedded metadata no longer make Sonder read it as empty. Open Source Workflow loads such a take's workflow, and a new take is saved with it.
-- Open Source Workflow shows one notice when a workflow can't be opened, not two.
-- In the editor, dropping an asset on a text field in the sidebar, such as the Assets search box, no longer adds a loader node to the hidden graph behind the editor.
+- Reference Lane Setup focuses the first unsupported role when it opens, and keeps keyboard focus when you switch the Template.
+- When a Subject chip and a Picture chip send the same member's text, the Picture chip now warns about it; untick **Definition** under **Prompt parts and routing** to send it once.
+- Clicking a timeline item too narrow to show its middle selects it, and Ctrl- or Shift-click adds it. Grabbing an edge and letting go without moving no longer adds an Undo step.
+- Dropping a clip on another clip of a different length swaps them without leaving them overlapping. A linked or locked clip is no longer swapped.
+- Dragging a guide at the scene end starts from where it is shown, instead of jumping to the start of the scene.
+- Duplicating a scene keeps its linked clips and audio linked in the copy.
+- A refused scene FPS change now says why: render jobs still queued for the scene, or the 99,999-frame limit.
+- In the editor, Assets and Reference Library rows say where a drag lands on the timeline. Assets rows used to point at the graph.
+- A failed Assets **Refresh** says so and offers **Retry**, and keeps the list, instead of reporting **Assets refreshed**. With edits still saving, Refresh runs once they have saved.
+- On Windows, a curly quote or certain other characters (such as Á, or Cyrillic) in a file's embedded metadata no longer make Sonder read it as empty: **Open Source Workflow** loads such a take's workflow. For takes saved before this, see [Troubleshooting](docs/troubleshooting.md#a-takes-workflow-reads-not-embedded-and-open-source-workflow-is-greyed-out).
+- Dropping an asset on a sidebar text field, such as the Assets search box, no longer adds a loader node to the hidden graph behind the editor.
 
 ## [0.8.3] - 2026-11-05
 
